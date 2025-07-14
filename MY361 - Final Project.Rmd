@@ -1,0 +1,2616 @@
+---
+title: "MY361 Project: Global Trade Analysis"
+output: html_document
+date: "2025-04-28"
+---
+
+```{r setup, include=FALSE}
+
+# Consolidated library loading
+required_packages <- c("readr", "igraph", "dplyr", "ggplot2", "ggrepel", 
+                       "reshape2", "tidygraph", "ggraph", "scales", 
+                       "RColorBrewer", "viridis", "patchwork", "corrplot","car", "cluster", "gridExtra" )
+
+# Use a function to check and load packages
+load_packages <- function(pkg_list) {
+  for(pkg in pkg_list) {
+    if(!requireNamespace(pkg, quietly = TRUE)) {
+      install.packages(pkg)
+    }
+    library(pkg, character.only = TRUE)
+  }
+}
+
+load_packages(required_packages)
+```
+
+## R Markdown
+
+
+Library, Data Introduction, and Generic Data Cleaning
+
+```{r}
+library(readr)
+library(igraph)
+library(dplyr)
+library(ggplot2)
+
+if (!requireNamespace("ggrepel", quietly = TRUE)) {
+  install.packages("ggrepel")
+}
+library(ggrepel)
+
+if (!requireNamespace("reshape2", quietly = TRUE)) {
+  install.packages("reshape2")
+}
+library(reshape2)
+trade_data <- read_csv("TradeData_4_1_2025_8_52_53(in).csv")
+
+
+```
+
+Candidate 37242: What do centrality metrics within the global trade network reveal about countries' influence beyond their economic size? 
+Corrections in Data
+```{r}
+# Fix encoding issues
+Encoding(trade_data$reporterDesc) <- "UTF-8"
+Encoding(trade_data$partner2Desc) <- "UTF-8"
+
+# Fix country names with special characters
+# 1. Fix Turkish spelling
+trade_data$reporterDesc[trade_data$reporterISO == "TUR"] <- "Turkey"
+trade_data$partner2Desc[trade_data$partner2ISO == "TUR"] <- "Turkey"
+
+# 2. Fix Côte d'Ivoire
+trade_data$reporterDesc[trade_data$reporterISO == "CIV"] <- "Côte d'Ivoire"
+trade_data$partner2Desc[trade_data$partner2ISO == "CIV"] <- "Côte d'Ivoire"
+
+# 3. Fix Curaçao
+trade_data$reporterDesc[trade_data$reporterISO == "CUW"] <- "Curaçao"
+trade_data$partner2Desc[trade_data$partner2ISO == "CUW"] <- "Curaçao"
+
+# 4. Fix Saint Barthélemy
+trade_data$reporterDesc[trade_data$reporterISO == "BLM"] <- "Saint Barthélemy"
+trade_data$partner2Desc[trade_data$partner2ISO == "BLM"] <- "Saint Barthélemy"
+
+# 5. Standardize United States
+trade_data$reporterDesc[trade_data$reporterISO == "USA"] <- "United States"
+trade_data$partner2Desc[trade_data$partner2ISO == "USA"] <- "United States"
+
+
+
+
+# Create filtered dataset for network analysis
+# Modified filter that preserves more trade information
+trade_df <- trade_data %>%
+  # Only filter out World as reporter, keep World as partner
+  filter(reporterISO != "W00") %>%
+  # Keep all non-NA descriptions
+  filter(!is.na(reporterDesc) & !is.na(partner2Desc)) %>%
+  # Keep only positive trade values
+  filter(primaryValue > 0)
+
+
+
+# Create a more complete trade network dataset that properly represents bilateral relationships
+complete_trade_df <- trade_df
+
+reverse_edges <- trade_df %>%
+  # Create reverse flow records
+  mutate(
+    temp_reporter = reporterDesc,
+    temp_reporterISO = reporterISO,
+    reporterDesc = partner2Desc,
+    reporterISO = partner2ISO,
+    partner2Desc = temp_reporter,
+    partner2ISO = temp_reporterISO,
+    flowDesc = ifelse(flowDesc == "Import", "Export", "Import"),
+    flowCode = ifelse(flowCode == "M", "X", "M")
+  ) %>%
+  select(-temp_reporter, -temp_reporterISO)
+
+# Combine original and reverse flows
+complete_trade_df <- bind_rows(trade_df, reverse_edges) %>%
+  distinct() # Remove any potential duplicates
+
+
+# Check US representation after adding bilateral relationships
+us_reporters_complete <- sum(complete_trade_df$reporterDesc == "United States")
+us_partners_complete <- sum(complete_trade_df$partner2Desc == "United States")
+
+```         
+
+
+International Trade Network Analysis: Centrality Measures 37242
+Part 1: Libraries & Data & Calculations
+
+```{r}
+
+# International Trade Network Analysis: Centrality Measures
+# This code analyzes the international trade network using various centrality measures
+
+# Load required libraries for chunk (again)
+library(igraph)
+library(dplyr)
+library(ggplot2)
+
+
+head(trade_data)
+str(trade_data)
+
+
+# Get unique countries
+all_countries <- unique(c(trade_df$reporterDesc, trade_df$partner2Desc))
+n_countries <- length(all_countries)
+
+# Create a mapping between country names and indices
+country_indices <- setNames(1:n_countries, all_countries)
+
+# Create the adjacency matrix
+trade_edges <- trade_df %>%
+  select(from = reporterDesc, to = partner2Desc, value = primaryValue)
+
+# Create graph directly from edge list
+trade_graph <- graph_from_data_frame(d = trade_edges, vertices = all_countries, directed = TRUE)
+
+
+# Calculate once and store in graph object
+V(trade_graph)$in_degree <- degree(trade_graph, mode = "in")
+V(trade_graph)$out_degree <- degree(trade_graph, mode = "out")
+V(trade_graph)$betweenness <- betweenness(trade_graph)
+V(trade_graph)$eigenvector <- eigen_centrality(trade_graph)$vector
+V(trade_graph)$pagerank <- page_rank(trade_graph)$vector
+V(trade_graph)$trade_balance <- V(trade_graph)$out_degree - V(trade_graph)$in_degree
+
+# Extract to dataframe when needed
+centrality_df <- data.frame(
+  country = V(trade_graph)$name,
+  in_degree = V(trade_graph)$in_degree,
+  out_degree = V(trade_graph)$out_degree,
+  betweenness = V(trade_graph)$betweenness,
+  eigenvector = V(trade_graph)$eigenvector,
+  page_rank = V(trade_graph)$pagerank,
+  trade_balance = V(trade_graph)$trade_balance
+)
+
+# Check how United States is represented in the data 
+###############Data Size is in billions -> exclusion from data
+
+
+unique_us_reporters <- unique(trade_data$reporterDesc[grepl("United States|USA|US", trade_data$reporterDesc, ignore.case = TRUE)])
+
+
+unique_us_partners <- unique(trade_data$partner2Desc[grepl("United States|USA|US", trade_data$partner2Desc, ignore.case = TRUE)])
+
+
+# Standardize United States naming before filtering
+# This needs to happen whether there are variations or not
+trade_data$reporterDesc[grepl("United States|USA|US", trade_data$reporterDesc, ignore.case = TRUE)] <- "United States"
+trade_data$partner2Desc[grepl("United States|USA|US", trade_data$partner2Desc, ignore.case = TRUE)] <- "United States"
+
+# Add region classification
+# Fix the classify_region function to correctly handle "Turkey"
+classify_region <- function(country) {
+  europe <- c('Albania', 'Austria', 'Belarus', 'Belgium', 'Bulgaria', 'Croatia', 'Cyprus', 
+              'Czechia', 'Denmark', 'Estonia', 'Finland', 'France', 'Germany', 'Greece', 
+              'Hungary', 'Iceland', 'Ireland', 'Italy', 'Latvia', 'Lithuania', 'Luxembourg', 
+              'Malta', 'Netherlands', 'Norway', 'Poland', 'Portugal', 'Romania', 'Slovakia', 
+              'Slovenia', 'Spain', 'Sweden', 'Switzerland', 'Ukraine', 'United Kingdom')
+  
+  asia <- c('Afghanistan', 'Armenia', 'Azerbaijan', 'Bangladesh', 'China', 'Georgia', 'India', 
+           'Indonesia', 'Iran', 'Iraq', 'Israel', 'Japan', 'Jordan', 'Kazakhstan', 'Lebanon', 
+           'Malaysia', 'Myanmar', 'Pakistan', 'Philippines', 'Qatar', 'Saudi Arabia', 'Singapore', 
+           'Sri Lanka', 'Thailand', 'Turkey', 'United Arab Emirates', 'Vietnam')
+  
+  north_america <- c('Canada', 'Mexico', 'United States')
+  
+  south_america <- c('Argentina', 'Bolivia', 'Brazil', 'Chile', 'Colombia', 'Ecuador', 
+                    'Peru', 'Uruguay', 'Venezuela')
+  
+  africa <- c('Algeria', 'Angola', 'Egypt', 'Ethiopia', 'Kenya', 'Morocco', 'Nigeria', 
+             'South Africa', 'Tunisia')
+  
+  oceania <- c('Australia', 'New Zealand')}
+  
+# International Trade Network Analysis: Centrality Measures
+# This code analyzes the international trade network using various centrality measures
+
+# Load required libraries for chunk (again)
+library(igraph)
+library(dplyr)
+library(ggplot2)
+
+head(trade_data)
+str(trade_data)
+
+# Get unique countries
+all_countries <- unique(c(trade_df$reporterDesc, trade_df$partner2Desc))
+n_countries <- length(all_countries)
+
+# Create a mapping between country names and indices
+country_indices <- setNames(1:n_countries, all_countries)
+
+# Create the adjacency matrix
+trade_edges <- trade_df %>%
+  select(from = reporterDesc, to = partner2Desc, value = primaryValue)
+
+# Create graph directly from edge list
+trade_graph <- graph_from_data_frame(d = trade_edges, vertices = all_countries, directed = TRUE)
+
+# Calculate once and store in graph object
+V(trade_graph)$in_degree <- degree(trade_graph, mode = "in")
+V(trade_graph)$out_degree <- degree(trade_graph, mode = "out")
+V(trade_graph)$betweenness <- betweenness(trade_graph)
+V(trade_graph)$eigenvector <- eigen_centrality(trade_graph)$vector
+V(trade_graph)$pagerank <- page_rank(trade_graph)$vector
+V(trade_graph)$trade_balance <- V(trade_graph)$out_degree - V(trade_graph)$in_degree
+
+# Extract to dataframe when needed
+centrality_df <- data.frame(
+  country = V(trade_graph)$name,
+  in_degree = V(trade_graph)$in_degree,
+  out_degree = V(trade_graph)$out_degree,
+  betweenness = V(trade_graph)$betweenness,
+  eigenvector = V(trade_graph)$eigenvector,
+  page_rank = V(trade_graph)$pagerank,
+  trade_balance = V(trade_graph)$trade_balance
+)
+
+# Check how United States is represented in the data 
+###############Data Size is in billions -> exclusion from data
+
+
+unique_us_reporters <- unique(trade_data$reporterDesc[grepl("United States|USA|US", trade_data$reporterDesc, ignore.case = TRUE)])
+
+
+
+unique_us_partners <- unique(trade_data$partner2Desc[grepl("United States|USA|US", trade_data$partner2Desc, ignore.case = TRUE)])
+
+
+# Standardize United States naming before filtering(coding issue pt2)
+# This needs to happen whether there are variations or not
+trade_data$reporterDesc[grepl("United States|USA|US", trade_data$reporterDesc, ignore.case = TRUE)] <- "United States"
+trade_data$partner2Desc[grepl("United States|USA|US", trade_data$partner2Desc, ignore.case = TRUE)] <- "United States"
+
+# Define region vectors correctly
+europe <- c('Albania', 'Austria', 'Belarus', 'Belgium', 'Bulgaria', 'Croatia', 'Cyprus', 
+            'Czechia', 'Denmark', 'Estonia', 'Finland', 'France', 'Germany', 'Greece', 
+            'Hungary', 'Iceland', 'Ireland', 'Italy', 'Latvia', 'Lithuania', 'Luxembourg', 
+            'Malta', 'Netherlands', 'Norway', 'Poland', 'Portugal', 'Romania', 'Slovakia', 
+            'Slovenia', 'Spain', 'Sweden', 'Switzerland', 'Ukraine', 'United Kingdom')
+
+asia <- c('Afghanistan', 'Armenia', 'Azerbaijan', 'Bangladesh', 'China', 'Georgia', 'India', 
+         'Indonesia', 'Iran', 'Iraq', 'Israel', 'Japan', 'Jordan', 'Kazakhstan', 'Lebanon', 
+         'Malaysia', 'Myanmar', 'Pakistan', 'Philippines', 'Qatar', 'Saudi Arabia', 'Singapore', 
+         'Sri Lanka', 'Thailand', 'Turkey', 'United Arab Emirates', 'Vietnam')
+
+north_america <- c('Canada', 'Mexico', 'United States')
+
+south_america <- c('Argentina', 'Bolivia', 'Brazil', 'Chile', 'Colombia', 'Ecuador', 
+                  'Peru', 'Uruguay', 'Venezuela')
+
+africa <- c('Algeria', 'Angola', 'Egypt', 'Ethiopia', 'Kenya', 'Morocco', 'Nigeria', 
+           'South Africa', 'Tunisia')
+
+oceania <- c('Australia', 'New Zealand')
+
+# Create lookup table once
+country_to_region <- list()
+for(region_name in c("Europe", "Asia", "North America", "South America", "Africa", "Oceania")) {
+  region_countries <- get(tolower(gsub(" ", "_", region_name)))  # Get the relevant vector with proper naming
+  for(country in region_countries) {
+    country_to_region[[country]] <- region_name
+  }
+}
+
+# Faster classification function
+classify_region <- function(country) {
+  # Direct lookup first (fast)
+  if(country %in% names(country_to_region)) {
+    return(country_to_region[[country]])
+  }
+  
+  # Fallback to region checking with optimized logic
+  for(region_name in c("Europe", "Asia", "North America", "South America", "Africa", "Oceania")) {
+    region_countries <- get(tolower(gsub(" ", "_", region_name)))
+    if(any(sapply(region_countries, function(x) grepl(x, country)))) {
+      return(region_name)
+    }
+  }
+  
+  return("Other")
+}
+
+# Now reapply the classification
+centrality_df$region <- sapply(centrality_df$country, classify_region)
+
+
+# Check USA data after filtering
+usa_reporters <- sum(trade_df$reporterDesc == "United States")
+usa_partners <- sum(trade_df$partner2Desc == "United States")
+
+
+
+
+  
+  # Check where the US ranks for each measure
+  us_ranks <- data.frame(
+    Measure = c("in_degree", "out_degree", "betweenness", "eigenvector", "page_rank"),
+    Rank = c(
+      rank(-centrality_df$in_degree)[centrality_df$country == "United States"],
+      rank(-centrality_df$out_degree)[centrality_df$country == "United States"],
+      rank(-centrality_df$betweenness)[centrality_df$country == "United States"],
+      rank(-centrality_df$eigenvector)[centrality_df$country == "United States"],
+      rank(-centrality_df$page_rank)[centrality_df$country == "United States"]
+    )
+  )
+ 
+  
+```
+International Trade Network Analysis: Centrality Measures 37242
+Part 2: Centrality Analysis
+```{r}
+
+# Analyze top countries by different centrality measures
+top_in_degree <- centrality_df %>%
+  arrange(desc(in_degree)) %>%
+  head(10)
+
+top_out_degree <- centrality_df %>%
+  arrange(desc(out_degree)) %>%
+  head(10)
+
+top_betweenness <- centrality_df %>%
+  arrange(desc(betweenness)) %>%
+  head(10)
+
+top_eigenvector <- centrality_df %>%
+  arrange(desc(eigenvector)) %>%
+  head(10)
+
+top_page_rank <- centrality_df %>%
+  arrange(desc(page_rank)) %>%
+  head(10)
+
+# Display top countries for each measure
+cat("\nTop 10 Countries by In-Degree Centrality (Import Partners):\n")
+print(data.frame(country = top_in_degree$country, in_degree = top_in_degree$in_degree))
+
+cat("\nTop 10 Countries by Out-Degree Centrality (Export Partners):\n")
+print(data.frame(country = top_out_degree$country, out_degree = top_out_degree$out_degree))
+
+cat("\nTop 10 Countries by Betweenness Centrality:\n")
+print(data.frame(country = top_betweenness$country, betweenness = round(top_betweenness$betweenness, 2)))
+
+cat("\nTop 10 Countries by Eigenvector Centrality:\n")
+print(data.frame(country = top_eigenvector$country, eigenvector = round(top_eigenvector$eigenvector, 4)))
+
+cat("\nTop 10 Countries by PageRank Centrality:\n")
+print(data.frame(country = top_page_rank$country, page_rank = round(top_page_rank$page_rank, 4)))
+
+# Calculate correlation between different centrality measures
+centrality_cors <- cor(centrality_df[, c("in_degree", "out_degree", "betweenness", "eigenvector", "page_rank")], 
+                      method = "spearman")
+
+# Display correlation matrix
+cat("\nCorrelations between centrality measures:\n")
+print(round(centrality_cors, 4))
+
+# Regional analysis
+region_stats <- centrality_df %>%
+  group_by(region) %>%
+  summarize(
+    count = n(),
+    avg_in_degree = mean(in_degree),
+    avg_out_degree = mean(out_degree),
+    avg_betweenness = mean(betweenness),
+    avg_eigenvector = mean(eigenvector),
+    avg_page_rank = mean(page_rank),
+    top_in_degree = country[which.max(in_degree)],
+    top_out_degree = country[which.max(out_degree)]
+  )
+
+# Display regional statistics
+cat("\nRegional Analysis - Average Centrality Measures:\n")
+print(region_stats)
+
+# Core-periphery analysis
+# Define core countries as those in the top 10% by PageRank
+page_rank_threshold <- quantile(centrality_df$page_rank, 0.9)
+centrality_df$core <- ifelse(centrality_df$page_rank >= page_rank_threshold, "Core", "Periphery")
+
+core_periphery_stats <- centrality_df %>%
+  group_by(core) %>%
+  summarize(
+    count = n(),
+    avg_in_degree = mean(in_degree),
+    avg_out_degree = mean(out_degree),
+    avg_betweenness = mean(betweenness)
+  )
+
+# Display core-periphery statistics
+cat("\nCore-Periphery Analysis:\n")
+print(core_periphery_stats)
+
+# List core countries and their regions
+core_countries <- centrality_df %>%
+  filter(core == "Core") %>%
+  select(country, region) %>%
+  arrange(region, country)
+
+cat("\nList of core countries:\n")
+print(core_countries)
+
+```
+International Trade Network Analysis: Centrality Measures 37242
+Part 3: Histogrammed Visualizations & Analysis
+
+```{r}
+
+# Visualize top countries by in-degree centrality
+safe_top_in_degree <- head(arrange(centrality_df, desc(in_degree)), 10) %>%
+  mutate(
+    # Replace special characters or use ASCII-safe version of country names if needed
+    country = iconv(country, to = "ASCII//TRANSLIT"),
+    # Ensure region is a character vector with no special characters
+    region = as.character(region)
+  )
+
+# Create the plot with the safe data frame
+p1 <- ggplot(safe_top_in_degree, aes(x = reorder(country, in_degree), y = in_degree, fill = region)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 Countries by In-Degree Centrality",
+       x = "Country",
+       y = "Number of Import Partners") +
+  theme_minimal()
+
+# Save the plot instead of displaying it directly as needed
+#ggsave("top_in_degree_plot.png", p1, width = 10, height = 6)
+
+print(p1)
+
+
+
+# Out-degree centrality
+safe_top_out_degree <- head(arrange(centrality_df, desc(out_degree)), 10) %>%
+  mutate(
+    country = iconv(country, to = "ASCII//TRANSLIT"),
+    region = as.character(region)
+  )
+
+p2 <- ggplot(safe_top_out_degree, aes(x = reorder(country, out_degree), y = out_degree, fill = region)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 Countries by Out-Degree Centrality",
+       x = "Country",
+       y = "Number of Export Partners") +
+  theme_minimal()
+# Save the plot instead of displaying it directly as needed
+#ggsave("top_out_degree_plot.png", p2, width = 10, height = 6)
+
+print(p2)
+
+# Betweenness centrality
+safe_top_betweenness <- head(arrange(centrality_df, desc(betweenness)), 10) %>%
+  mutate(
+    country = iconv(country, to = "ASCII//TRANSLIT"),
+    region = as.character(region),
+    # Round betweenness for cleaner display
+    betweenness = round(betweenness, 2)
+  )
+
+p3 <- ggplot(safe_top_betweenness, aes(x = reorder(country, betweenness), y = betweenness, fill = region)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 Countries by Betweenness Centrality",
+       x = "Country",
+       y = "Betweenness Score") +
+  theme_minimal()
+print(p3)
+
+# Save the plot instead of displaying it directly as needed
+#ggsave("top_betweenness_plot.png", p3, width = 10, height = 6)
+
+# Alternative approach: Create a combined plot using facets for comparing across different centrality measures
+top_countries <- unique(c(
+  safe_top_in_degree$country,
+  safe_top_out_degree$country,
+  safe_top_betweenness$country
+))
+
+# Create a combined data frame for faceted plotting
+combined_centrality <- centrality_df %>%
+  filter(country %in% top_countries) %>%
+  mutate(
+    country = iconv(country, to = "ASCII//TRANSLIT"),
+    region = as.character(region)
+  ) %>%
+  select(country, region, in_degree, out_degree, betweenness) %>%
+  tidyr::pivot_longer(
+    cols = c(in_degree, out_degree, betweenness),
+    names_to = "centrality_type",
+    values_to = "value"
+  ) %>%
+  # Create a more readable label for the centrality types
+  mutate(
+    centrality_type = case_when(
+      centrality_type == "in_degree" ~ "Import Partners",
+      centrality_type == "out_degree" ~ "Export Partners",
+      centrality_type == "betweenness" ~ "Betweenness",
+      TRUE ~ centrality_type
+    )
+  )
+
+# Alternative for unexpected erroring (Priority)
+p4_alt <- ggplot(combined_centrality, aes(x = country, y = value, fill = region)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  facet_wrap(~centrality_type, scales = "free") +
+  labs(title = "Top Countries by Different Centrality Measures",
+       x = "Country",
+       y = "Centrality Value") +
+  theme_minimal()
+
+print(p4_alt)
+# Save the faceted plot as necessary
+#ggsave("combined_centrality_plot.png", p4_alt, width = 12, height = 8)
+
+
+##################################################################################
+# Visualize regional comparison
+ 
+#Clean the region names to prevent encoding issues
+safe_region_stats <- region_stats %>%
+  mutate(
+    # Convert region names to ASCII to avoid rendering issues
+    region = iconv(as.character(region), to = "ASCII//TRANSLIT")
+  )
+
+# Basic regional comparison plot for centrality measures
+p_region <- ggplot(safe_region_stats, 
+                   aes(x = reorder(region, avg_in_degree), 
+                       y = avg_in_degree, 
+                       fill = region)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Average In-Degree Centrality by Region",
+       x = "Region",
+       y = "Average Number of Import Partners") +
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove redundant legend
+
+print(p_region)
+
+# Save the plot as needed
+# ggsave("regional_in_degree.png", p_region, width = 8, height = 6)
+
+# Comprehensive regional comparison
+
+
+# Create a long-format dataframe with multiple centrality measures
+regional_comparison <- safe_region_stats %>%
+  select(region, avg_in_degree, avg_out_degree, avg_betweenness) %>%
+  reshape2::melt(
+    id.vars = "region",
+    measure.vars = c("avg_in_degree", "avg_out_degree", "avg_betweenness"),
+    variable.name = "measure",
+    value.name = "value"
+  ) %>%
+  # Update labels
+  mutate(
+    measure = case_when(
+      measure == "avg_in_degree" ~ "Import Partners",
+      measure == "avg_out_degree" ~ "Export Partners",
+      measure == "avg_betweenness" ~ "Betweenness",
+      TRUE ~ as.character(measure)
+    )
+  )
+
+# Create a grouped bar chart for regional comparison
+p_regional_comparison <- ggplot(regional_comparison, 
+                                aes(x = region, y = value, fill = measure)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Regional Comparison of Centrality Measures",
+       x = "Region",
+       y = "Average Value",
+       fill = "Measure") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p_regional_comparison)
+# Save the grouped bar chart as necessary
+# ggsave("regional_comparison.png", p_regional_comparison, width = 10, height = 6)
+
+# Alternative: Faceted view for clearer comparison
+p_regional_facet <- ggplot(regional_comparison, 
+                          aes(x = reorder(region, value), y = value, fill = region)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ measure, scales = "free_y") +
+  coord_flip() +
+  labs(title = "Regional Comparison of Centrality Measures",
+       x = "Region",
+       y = "Average Value") +
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove redundant legend
+
+print(p_regional_facet)
+# Save the faceted plot as necessary
+# ggsave("regional_comparison_facet.png", p_regional_facet, width = 12, height = 6)
+
+# For regional trade balance analysis
+if(exists("trade_balance_by_region")) {
+  safe_balance <- trade_balance_by_region %>%
+    mutate(
+      region = iconv(as.character(region), to = "ASCII//TRANSLIT")
+    )
+  
+  p_balance <- ggplot(safe_balance, 
+                     aes(x = reorder(region, avg_trade_balance), 
+                         y = avg_trade_balance, 
+                         fill = avg_trade_balance > 0)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    scale_fill_manual(values = c("firebrick", "forestgreen"), 
+                     labels = c("Negative", "Positive"),
+                     name = "Balance") +
+    labs(title = "Average Trade Balance by Region",
+         subtitle = "Based on difference between export and import partners",
+         x = "Region",
+         y = "Average Trade Balance") +
+    theme_minimal()
+  
+print(p_balance)
+  # Save the plot as necessary
+  # ggsave("regional_trade_balance.png", p_balance, width = 8, height = 6)
+}
+
+# For showing proportion of positive vs negative balance countries by region
+if(exists("trade_balance_by_region") && "positive_balance_pct" %in% names(trade_balance_by_region)) {
+  balance_stack_data <- safe_balance %>%
+    mutate(
+      negative_balance_pct = 100 - positive_balance_pct
+    ) %>%
+    pivot_longer(
+      cols = c(positive_balance_pct, negative_balance_pct),
+      names_to = "balance_type",
+      values_to = "percentage"
+    ) %>%
+    mutate(
+      balance_type = ifelse(balance_type == "positive_balance_pct", 
+                           "Positive Balance", "Negative Balance")
+    )
+  
+  p_balance_stack <- ggplot(balance_stack_data, 
+                          aes(x = region, y = percentage, fill = balance_type)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = c("firebrick", "forestgreen")) +
+    labs(title = "Distribution of Trade Balance by Region",
+         x = "Region",
+         y = "Percentage of Countries",
+         fill = "Balance Type") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(p_balance_stack)
+  # Save plot as necessary
+  # ggsave("regional_balance_distribution.png", p_balance_stack, width = 9, height = 6)
+}
+
+
+# Key insights:
+# 1. European countries tend to have both high import and export centrality
+# 2. Several Asian countries show high betweenness centrality
+# 3. North American countries have balanced import and export connections
+# 4. Stronger correlation between out-degree and betweenness centrality
+# 5. Developing regions show asymmetric patterns in import vs export connections
+
+```
+International Trade Network Analysis: Centrality Measures 37242
+Part 4: Base-line Centrality Visualization and Intepretations
+```{r}
+
+# International Trade Network Analysis: Centrality Measures
+
+library(igraph)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(RColorBrewer)
+
+# Network visualization function with centrality highlighting
+visualize_network_centrality <- function(graph, centrality_measure, measure_name, top_n = 20) {
+  if(!is.numeric(centrality_measure) || length(centrality_measure) != vcount(graph)) {
+    stop(paste("Centrality measure must be numeric and have length equal to vertex count:", vcount(graph)))
+  }
+  
+  top_indices <- order(centrality_measure, decreasing = TRUE)[1:min(top_n, length(centrality_measure))]
+  top_countries <- V(graph)$name[top_indices]
+  
+  top_subgraph <- induced_subgraph(graph, which(V(graph)$name %in% top_countries))
+  
+  V(top_subgraph)$size <- centrality_measure[match(V(top_subgraph)$name, V(graph)$name)]
+  
+  if(max(V(top_subgraph)$size) > 0) {
+    V(top_subgraph)$size <- 3 + 15 * (V(top_subgraph)$size / max(V(top_subgraph)$size))
+  } else {
+    V(top_subgraph)$size <- 5
+  }
+  
+  region_colors <- c("Europe" = "blue", "Asia" = "red", "North America" = "green", 
+                   "South America" = "purple", "Africa" = "orange", "Oceania" = "yellow",
+                   "Other" = "gray")
+  
+  V(top_subgraph)$region <- sapply(V(top_subgraph)$name, classify_region)
+  
+  V(top_subgraph)$color <- sapply(V(top_subgraph)$region, function(r) {
+    if(r %in% names(region_colors)) return(region_colors[r])
+    return("gray")
+  })
+  
+  set.seed(42)
+  layout <- layout_with_fr(top_subgraph)
+  
+  plot(top_subgraph, 
+     layout = layout,
+     vertex.label = V(top_subgraph)$name,
+     vertex.label.cex = 0.8,
+     vertex.label.color = "black",
+     vertex.label.dist = 0.7,
+     edge.arrow.size = 0.4,
+     edge.color = "lightgray",
+     edge.width = 0.8,
+     edge.curved = 0.2,
+     main = paste("Top", top_n, "Countries by", measure_name),
+     sub = paste("Node size represents", measure_name, "- larger nodes indicate higher values"))
+
+  
+  present_regions <- unique(V(top_subgraph)$region)
+  legend_regions <- names(region_colors)[names(region_colors) %in% present_regions]
+  legend_colors <- region_colors[legend_regions]
+  
+  legend("bottomright", 
+         legend = legend_regions,
+         col = legend_colors, 
+         pch = 19,
+         cex = 0.7,
+         title = "Regions")
+  
+  return(top_subgraph)
+}
+
+# In-Degree Centrality visualization
+png("trade_network_in_degree.png", width = 1000, height = 800, res = 100)
+in_degree <- V(trade_graph)$in_degree
+visualize_network_centrality(trade_graph, in_degree, "In-Degree Centrality")
+dev.off()
+
+# Display In-Degree centrality directly on screen
+in_degree <- V(trade_graph)$in_degree
+visualize_network_centrality(trade_graph, in_degree, "In-Degree Centrality")
+title(sub = "Node size represents number of import partners (in-degree)", line = 1)
+# Node size is proportional to the number of incoming trade connections (import partners)
+
+# Out-Degree Centrality visualization
+png("trade_network_out_degree.png", width = 1000, height = 800, res = 100)
+out_degree <- V(trade_graph)$out_degree
+visualize_network_centrality(trade_graph, out_degree, "Out-Degree Centrality")
+dev.off()
+
+
+# Display Out-Degree centrality directly on screen
+out_degree <- V(trade_graph)$out_degree
+visualize_network_centrality(trade_graph, out_degree, "Out-Degree Centrality")
+title(sub = "Node size represents number of export partners (out-degree)", line = 1)
+
+# Betweenness Centrality visualization
+png("trade_network_betweenness.png", width = 1000, height = 800, res = 100)
+betweenness <- V(trade_graph)$betweenness
+visualize_network_centrality(trade_graph, betweenness, "Betweenness Centrality")
+dev.off()
+
+# Display Betweenness centrality directly on screen
+betweenness <- V(trade_graph)$betweenness
+visualize_network_centrality(trade_graph, betweenness, "Betweenness Centrality")
+title(sub = "Node size represents importance as trade intermediaries (betweenness)", line = 1)
+
+# Eigenvector Centrality visualization
+png("trade_network_eigenvector.png", width = 1000, height = 800, res = 100)
+eigenvector <- V(trade_graph)$eigenvector
+visualize_network_centrality(trade_graph, eigenvector, "Eigenvector Centrality")
+dev.off()
+
+# Display Eigenvector centrality directly on screen
+eigenvector <- V(trade_graph)$eigenvector
+visualize_network_centrality(trade_graph, eigenvector, "Eigenvector Centrality")
+title(sub = "Node size represents connections to well-connected countries (eigenvector)", line = 1)
+
+# PageRank Centrality visualization
+png("trade_network_pagerank.png", width = 1000, height = 800, res = 100)
+page_rank <- V(trade_graph)$pagerank
+visualize_network_centrality(trade_graph, page_rank, "PageRank Centrality")
+dev.off()
+
+# Display PageRank centrality directly on screen
+page_rank <- V(trade_graph)$pagerank
+visualize_network_centrality(trade_graph, page_rank, "PageRank Centrality")
+title(sub = "Node size represents trade influence considering partner importance (PageRank)", line = 1)
+
+# Burt's structural holes analysis
+constraint_scores <- tryCatch({
+  constraint(trade_graph)
+}, error = function(e) {
+  sapply(1:vcount(trade_graph), function(i) {
+    neighbors <- neighbors(trade_graph, i)
+    if(length(neighbors) <= 1) return(1)
+    return(1 - (length(neighbors) / vcount(trade_graph)))
+  })
+})
+
+centrality_df$constraint <- constraint_scores[match(centrality_df$country, V(trade_graph)$name)]
+
+structural_brokers <- centrality_df %>%
+  filter(!is.na(betweenness) & !is.na(constraint)) %>%
+  filter(betweenness > quantile(betweenness, 0.75, na.rm = TRUE)) %>%
+  filter(constraint < quantile(constraint, 0.25, na.rm = TRUE)) %>%
+  arrange(constraint)
+
+print(structural_brokers[, c("country", "region", "betweenness", "constraint")])
+
+p1 <- ggplot(centrality_df, aes(x = constraint, y = betweenness)) +
+  geom_point(aes(color = region, size = out_degree), alpha = 0.7) +
+  geom_text(data = head(structural_brokers, 10), aes(label = country), vjust = -1, size = 3) +
+  scale_size_continuous(range = c(1, 10)) +
+  labs(title = "Structural Holes Analysis: Betweenness vs. Constraint",
+       x = "Constraint (Lower = More Structural Holes)",
+       y = "Betweenness Centrality",
+       color = "Region",
+       size = "Out-Degree") +
+  theme_minimal()
+ggsave("structural_holes_analysis.png", plot = p1, width = 10, height = 8, dpi = 300)
+print(p1)
+
+
+# Regional community detection and trade clusters
+communities <- tryCatch({
+  # Louvain algorithm is better for detecting natural clusters in trade networks
+  cluster_louvain(trade_graph, resolution = 1.2)  # Higher resolution detects more communities
+}, error = function(e) {
+  # Fallback to other algorithms if Louvain fails
+  tryCatch({
+    # Fast greedy is efficient and works well on larger networks
+    cluster_fast_greedy(trade_graph)
+  }, error = function(e2) {
+    # Label propagation as final fallback
+    cluster_label_prop(trade_graph)
+  })
+})
+
+# Check how many communities were detected
+membership <- membership(communities)
+community_sizes <- table(membership)
+n_communities <- length(community_sizes)
+
+
+cat("Detected", n_communities, "communities with sizes:\n")
+modularity_score <- modularity(trade_graph, membership)
+cat("Community structure modularity:", round(modularity_score, 4), 
+    "(higher values indicate stronger community divisions)\n")
+print(community_sizes)
+
+# If we have only 1 or very few communities, try alternative algorithms
+if(n_communities < 3) {
+  # Try edge betweenness which is good at finding smaller community divisions
+  # but with a size limit to prevent computational issues
+  if(vcount(trade_graph) <= 200) {
+    communities_alt <- tryCatch({
+      cluster_edge_betweenness(trade_graph)
+    }, error = function(e) {
+      # Walktrap as another alternative
+      cluster_walktrap(trade_graph)
+    })
+    
+    membership_alt <- membership(communities_alt)
+    community_sizes_alt <- table(membership_alt)
+    n_communities_alt <- length(community_sizes_alt)
+    
+    # If alternative algorithm found more communities, use that instead
+    if(n_communities_alt > n_communities) {
+      cat("Alternative algorithm detected", n_communities_alt, "communities:\n")
+      print(community_sizes_alt)
+      communities <- communities_alt
+      membership <- membership_alt
+      n_communities <- n_communities_alt
+    }
+  }
+}
+
+# Ensure community assignments are transferred to both original and sample graphs
+V(trade_graph)$community <- membership
+centrality_df$community <- membership[match(centrality_df$country, V(trade_graph)$name)]
+
+# Community visualization function
+visualize_communities_improved <- function(graph, membership, filename = NULL, 
+                                        node_size_attr = "betweenness",
+                                        max_labels = 30, 
+                                        min_size = 2, max_size = 15) {
+  
+  if(length(membership) != vcount(graph)) {
+    stop("Membership vector must match the number of vertices in the graph")
+  }
+  
+  V(graph)$community <- membership
+  
+  if(node_size_attr %in% vertex_attr_names(graph)) {
+    node_sizes <- get.vertex.attribute(graph, node_size_attr)
+  } else {
+    node_sizes <- degree(graph, mode = "total")
+  }
+  
+  if(max(node_sizes) > 0) {
+    V(graph)$size <- min_size + (max_size - min_size) * (node_sizes / max(node_sizes))
+  } else {
+    V(graph)$size <- min_size
+  }
+  
+  n_comm <- length(unique(membership))
+  if(n_comm <= 8) {
+    comm_colors <- brewer.pal(max(8, n_comm), "Set1")[1:n_comm]
+  } else {
+    comm_colors <- rainbow(n_comm, s = 0.8, v = 0.9)
+  }
+  
+  unique_comms <- sort(unique(membership))
+  color_map <- setNames(comm_colors, unique_comms)
+  V(graph)$color <- color_map[as.character(V(graph)$community)]
+  
+  set.seed(42)
+  layout <- layout_with_fr(graph, niter = 500, area = vcount(graph)^2.3, repulserad = vcount(graph)^2.8)
+  
+  if(vcount(graph) > max_labels) {
+    label_threshold <- sort(V(graph)$size, decreasing = TRUE)[max_labels]
+    V(graph)$label <- ifelse(V(graph)$size >= label_threshold, V(graph)$name, NA)
+  } else {
+    V(graph)$label <- V(graph)$name
+  }
+  
+  E(graph)$width <- 0.5
+  E(graph)$arrow.size <- 0.3
+  E(graph)$color <- adjustcolor("gray", alpha.f = 0.5)
+  E(graph)$curved <- 0.2
+  
+  V(graph)$label.cex <- 0.7
+  V(graph)$label.dist <- 0.7
+  V(graph)$label.color <- "black"
+  
+  if(!is.null(filename)) {
+    png(filename, width = 1800, height = 1600, res = 120)
+  }
+  
+  plot(graph,
+       layout = layout,
+       vertex.label = V(graph)$label,
+       main = "Trade Network Communities",
+       sub = paste("Detected", n_comm, "distinct communities"),
+       margin = c(0, 0, 1, 0))
+  
+  legend("bottomright", 
+         legend = paste("Community", unique_comms),
+         col = comm_colors, 
+         pch = 19,
+         pt.cex = 1.5,
+         cex = 0.7,
+         bty = "n",
+         title = paste("Communities (", n_comm, "total )"))
+  
+  if(!is.null(filename)) {
+    dev.off()
+  }
+  
+  return(graph)
+}
+
+# Sample the graph with importance weighting
+# Create a stratified sampling function
+stratified_sample <- function(graph, membership, min_per_community = 3, max_total = 100) {
+  community_ids <- unique(membership)
+  sample_vertices <- c()
+  
+  # For each community, select at least min_per_community nodes with highest betweenness
+  for(comm in community_ids) {
+    comm_vertices <- which(membership == comm)
+    if(length(comm_vertices) > 0) {
+      # Get betweenness for this community's nodes
+      comm_betweenness <- betweenness(graph, v = comm_vertices)
+      # Sort by betweenness and select top nodes
+      top_vertices <- comm_vertices[order(comm_betweenness, decreasing = TRUE)]
+      # Take at least min_per_community or all if fewer
+      top_vertices <- head(top_vertices, min(length(top_vertices), min_per_community))
+      sample_vertices <- c(sample_vertices, top_vertices)
+    }
+  }
+  
+  # If we need more nodes to reach max_total, add remaining top betweenness nodes
+  if(length(sample_vertices) < max_total) {
+    remaining_vertices <- setdiff(1:vcount(graph), sample_vertices)
+    if(length(remaining_vertices) > 0) {
+      remaining_betweenness <- betweenness(graph, v = remaining_vertices)
+      top_remaining <- remaining_vertices[order(remaining_betweenness, decreasing = TRUE)]
+      # Add until we reach max_total
+      additional_vertices <- head(top_remaining, min(length(top_remaining), 
+                                                    max_total - length(sample_vertices)))
+      sample_vertices <- c(sample_vertices, additional_vertices)
+    }
+  }
+  
+  return(sample_vertices)
+}
+
+# Create a balanced sample with representatives from each community
+sample_vertices <- stratified_sample(trade_graph, membership, 
+                                    min_per_community = 5, max_total = 100)
+sample_graph <- induced_subgraph(trade_graph, sample_vertices)
+
+# Ensure community membership is transferred to sample graph
+V(sample_graph)$community <- membership[sample_vertices]
+
+# Use a more appropriate layout algorithm that separates communities
+set.seed(42)
+layout <- layout_with_lgl(sample_graph)  # LGL algorithm is good for community separation
+
+# Set node sizes based on betweenness for visualization
+node_betweenness <- betweenness(sample_graph)
+if(max(node_betweenness) > 0) {
+  V(sample_graph)$size <- 3 + 15 * (node_betweenness / max(node_betweenness))
+} else {
+  V(sample_graph)$size <- 5
+}
+
+# Create a distinct color palette for the communities
+if(n_communities <= 9) {
+  comm_colors <- brewer.pal(9, "Set1")[1:n_communities]
+} else {
+  comm_colors <- colorRampPalette(brewer.pal(9, "Set1"))(n_communities)
+}
+V(sample_graph)$color <- comm_colors[V(sample_graph)$community]
+
+# Show the communities with appropriate labels
+# Only create this plot once to avoid duplication
+png("trade_network_communities_improved.png", width = 1800, height = 1600, res = 120)
+
+# Plot with appropriate parameters for better visibility
+plot(sample_graph,
+     layout = layout,
+     vertex.label = V(sample_graph)$name,
+     vertex.label.cex = 0.7,
+     vertex.label.dist = 0.8,
+     vertex.label.color = "black",
+     edge.arrow.size = 0.3,
+     edge.width = 0.5,
+     edge.color = adjustcolor("gray", alpha.f = 0.4),
+     edge.curved = 0.2,
+     mark.groups = by(seq_len(vcount(sample_graph)), V(sample_graph)$community, function(x) x),
+     mark.col = adjustcolor(comm_colors, alpha.f = 0.2),
+     mark.border = comm_colors,
+     main = "Trade Network Communities",
+     sub = paste("Detected", n_communities, "communities - Node size represents betweenness centrality"))
+
+# Create a proper legend with community sizes
+legend("bottomright", 
+       legend = paste("Community", 1:n_communities, 
+                     " (", table(V(sample_graph)$community), " countries)", sep=""),
+       fill = comm_colors,
+       border = comm_colors,
+       cex = 0.8,
+       title = "Communities")
+dev.off()
+
+# For ggplot visualization, create a more informative display that avoids the issues
+# Create dataframe with node information
+node_df <- data.frame(
+  country = V(sample_graph)$name,
+  community = V(sample_graph)$community,
+  betweenness = node_betweenness,
+  # Normalize betweenness to a reasonable size range
+  node_size = ifelse(max(node_betweenness) > 0,
+                    2 + 8 * (node_betweenness / max(node_betweenness)),
+                    3),
+  x = layout[,1],
+  y = layout[,2]
+)
+
+# Calculate community centroids
+centroid_df <- node_df %>%
+  group_by(community) %>%
+  summarize(
+    x = mean(x),
+    y = mean(y),
+    count = n(),
+    avg_betweenness = mean(betweenness)
+  )
+
+# Create the ggplot visualization with clear community structure
+node_df <- data.frame(
+  country = V(sample_graph)$name,
+  community = as.factor(V(sample_graph)$community),  # Convert to factor
+  betweenness = node_betweenness,
+  x = layout[,1],
+  y = layout[,2]
+)
+
+# Add size that's guaranteed to work
+node_df$node_size <- 3
+if(max(node_betweenness) > 0) {
+  node_df$node_size <- 3 + 7 * (node_betweenness / max(node_betweenness))
+}
+
+# Simple community centroids
+centroid_df <- node_df %>%
+  group_by(community) %>%
+  summarize(
+    x = mean(x),
+    y = mean(y),
+    count = n()
+  )
+
+# Basic ggplot that will definitely work
+community_plot <- ggplot(node_df, aes(x = x, y = y)) +
+  # Add nodes
+  geom_point(aes(color = community, size = node_size), alpha = 0.7) +
+  # Add community labels
+  geom_label(data = centroid_df, 
+            aes(x = x, y = y, label = paste("Community", community)),
+            size = 4, fontface = "bold", alpha = 0.8) +
+  # Add important country labels
+  geom_text(data = node_df %>% 
+             arrange(desc(betweenness)) %>% 
+             head(10), 
+           aes(label = country),
+           hjust = -0.2, size = 3) +
+  # Basic theming
+  scale_size_continuous(range = c(2, 8), guide = "none") +
+  labs(title = "International Trade Network Communities",
+       subtitle = paste("Detected", n_communities, "distinct trading communities"),
+       color = "Community") +
+  theme_minimal()
+
+# Display the plot - first save to make sure that works
+ggsave("trade_community_structure_basic.png", 
+       plot = community_plot, 
+       width = 12, height = 10, dpi = 150)
+
+# Then try to display it
+print(community_plot)
+
+# Community analysis metrics
+community_metrics <- centrality_df %>%
+  group_by(community) %>%
+  summarize(
+    size = n(),
+    avg_betweenness = mean(betweenness, na.rm = TRUE),
+    max_betweenness = max(betweenness, na.rm = TRUE),
+    top_country = country[which.max(betweenness)],
+    avg_in_degree = mean(in_degree, na.rm = TRUE),
+    avg_out_degree = mean(out_degree, na.rm = TRUE),
+    dominant_region = names(which.max(table(region)))
+  ) %>%
+  arrange(desc(size))
+
+print(community_metrics)
+
+# Measure assortativity based on regions
+V(trade_graph)$region <- sapply(V(trade_graph)$name, classify_region)
+region_num <- as.numeric(factor(V(trade_graph)$region))
+assortativity <- assortativity_nominal(trade_graph, region_num)
+
+# Calculating assortativity statistical significance
+assortativity_significance_test <- function(graph, types, samples = 1000) {
+  observed <- assortativity_nominal(graph, types)
+  
+  # Create random distribution through permutation
+  random_assortativity <- numeric(samples)
+  for(i in 1:samples) {
+    # Permute the types randomly
+    random_types <- sample(types)
+    random_assortativity[i] <- assortativity_nominal(graph, random_types)
+  }
+  
+  # Calculate empirical p-value (proportion of random values >= observed)
+  if(observed >= 0) {
+    # For positive assortativity, we want to know how often random networks have higher values
+    p_value <- sum(random_assortativity >= observed) / samples
+  } else {
+    # For negative assortativity, we want to know how often random networks have lower values
+    p_value <- sum(random_assortativity <= observed) / samples
+  }
+  
+  # Plot distribution for visual inspection
+  hist(random_assortativity, main = "Assortativity Significance Test",
+       xlab = "Assortativity (random permutations)", 
+       col = "lightblue", border = "white")
+  abline(v = observed, col = "red", lwd = 2)
+  text(observed, 0, paste("Observed:", round(observed, 3)), 
+       pos = 4, col = "red")
+  
+  return(p_value)
+}
+
+# Run the significance test with fewer samples for computational efficiency
+assortativity_p <- assortativity_significance_test(trade_graph, region_num, samples = 100)
+cat("Regional assortativity p-value:", assortativity_p, 
+    "(values < 0.05 indicate statistically significant regional clustering)\n")
+
+# Create regional trade flow matrix
+regions_list <- unique(V(trade_graph)$region)
+region_flows <- matrix(0, nrow = length(regions_list), ncol = length(regions_list))
+rownames(region_flows) <- regions_list
+colnames(region_flows) <- regions_list
+
+for(i in 1:ecount(trade_graph)) {
+  edge <- get.edges(trade_graph, i)
+  from_region <- V(trade_graph)$region[edge[1]]
+  to_region <- V(trade_graph)$region[edge[2]]
+  region_flows[from_region, to_region] <- region_flows[from_region, to_region] + 1
+}
+
+region_flows_df <- as.data.frame(as.table(region_flows))
+names(region_flows_df) <- c("source_region", "target_region", "value")
+
+p3 <- ggplot(region_flows_df, aes(x = source_region, y = target_region, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Regional Trade Flows",
+       x = "Exporting Region",
+       y = "Importing Region",
+       fill = "Number of Trade Links") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("regional_trade_flows.png", plot = p3, width = 10, height = 8, dpi = 300)
+print(p3)
+
+# Calculate correlations between centrality measures
+centrality_cors <- cor(centrality_df[, c("in_degree", "out_degree", "betweenness", "eigenvector", "page_rank")], 
+                    method = "spearman")
+
+# Create network metrics
+network_metrics <- data.frame(
+  metric = c("Nodes", "Edges", "Density", "Diameter", "Communities", "Modularity", "Assortativity"),
+  value = c(vcount(trade_graph), ecount(trade_graph), 
+           graph.density(trade_graph), diameter(trade_graph), 
+           n_communities, modularity_score, assortativity)
+)
+print(network_metrics)
+
+```
+International Trade Network Analysis: Centrality Measures 37242
+Part 5: Centrality through the Network
+
+```{r}
+# Centrality Analysis of International Trade Networks
+# Centrality Analysis of International Trade Networks
+# This code analyzes various centrality measures in the international trade network and
+# examines their relationships and implications for global trade patterns
+
+library(igraph)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(tidyr)
+# New libraries
+library(car)      # For statistical testing
+library(cluster)  # For structural equivalence
+library(gridExtra) # For arranging multiple plots
+
+# Assuming previous code has run, building on previous centrality calculations
+# This script focuses on deeper analysis of centrality measures and their implications
+
+# 1. Comparing Different Centrality Measures
+# Create a comprehensive comparison of centrality measures for top countries
+
+# Standardize centrality measures for fair comparison
+standardize <- function(x) {
+  if(max(x) == min(x)) return(rep(0, length(x)))
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+centrality_df$std_in_degree <- standardize(centrality_df$in_degree)
+centrality_df$std_out_degree <- standardize(centrality_df$out_degree)
+centrality_df$std_betweenness <- standardize(centrality_df$betweenness)
+centrality_df$std_eigenvector <- standardize(centrality_df$eigenvector)
+centrality_df$std_page_rank <- standardize(centrality_df$page_rank)
+
+# Select top 20 countries by any centrality measure
+top_countries <- unique(c(
+  centrality_df %>% top_n(20, in_degree) %>% pull(country),
+  centrality_df %>% top_n(20, out_degree) %>% pull(country),
+  centrality_df %>% top_n(20, betweenness) %>% pull(country),
+  centrality_df %>% top_n(20, eigenvector) %>% pull(country),
+  centrality_df %>% top_n(20, page_rank) %>% pull(country)
+))
+
+# Create a comparison dataframe
+top_centrality_comparison <- centrality_df %>%
+  filter(country %in% top_countries) %>%
+  select(country, region, std_in_degree, std_out_degree, std_betweenness, 
+         std_eigenvector, std_page_rank) %>%
+  arrange(desc(std_betweenness))
+
+# Print comparison table
+cat("Centrality Comparison for Top Countries (Standardized Scores):\n")
+print(top_centrality_comparison)
+
+# Visualize the comparison with a better format
+# First, select only the top countries by average centrality to reduce overcrowding
+top_countries_for_plot <- centrality_df %>%
+  mutate(avg_centrality = (std_in_degree + std_out_degree + std_betweenness + 
+                          std_eigenvector + std_page_rank) / 5) %>%
+  top_n(15, avg_centrality) %>%  # Limit to top 15 countries
+  pull(country)
+
+# Create a filtered comparison dataframe
+filtered_centrality_comparison <- centrality_df %>%
+  filter(country %in% top_countries_for_plot) %>%
+  select(country, region, std_in_degree, std_out_degree, std_betweenness, 
+         std_eigenvector, std_page_rank) %>%
+  arrange(desc(std_betweenness))  # Sort by betweenness for better visualization
+
+# Convert to long format with better labels
+centrality_long <- filtered_centrality_comparison %>%
+  pivot_longer(cols = starts_with("std_"), 
+               names_to = "measure", 
+               values_to = "value") %>%
+  mutate(measure = sub("std_", "", measure),
+         # Improving label readability
+         measure = factor(measure, 
+                         levels = c("in_degree", "out_degree", "betweenness", "eigenvector", "page_rank"),
+                         labels = c("Import Connections", "Export Connections", 
+                                   "Trade Brokerage", "Elite Connections", "Trade Influence")))
+
+# Create heatmap with better spacing and clarity
+ggplot(centrality_long, aes(x = measure, y = reorder(country, value, mean))) +
+  geom_tile(aes(fill = value), color = "white", size = 0.2) +  # Add thin white borders
+  scale_fill_gradient2(low = "white", mid = "skyblue", high = "navy",
+                      midpoint = 0.5, name = "Standardized\nScore") +
+  theme_minimal() +
+  labs(title = "Multi-dimensional Centrality Comparison",
+       subtitle = "Top 15 Countries Across Different Network Position Measures",
+       y = NULL, x = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 11),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "right")
+
+
+# 2. Correlation Analysis Between Centrality Measures
+correlation_matrix <- cor(centrality_df[, c("in_degree", "out_degree", "betweenness", 
+                                          "eigenvector", "page_rank")],
+                         method = "spearman")
+
+cat("\nCorrelation Between Centrality Measures:\n")
+print(round(correlation_matrix, 4))
+
+# Visualize correlation matrix
+corrplot(correlation_matrix, method = "color", type = "upper", 
+         tl.col = "black", tl.srt = 45, addCoef.col = "black",
+         title = "Correlation Between Different Network Position Measures",
+         mar = c(0,0,2,0))
+
+# 3. Identifying Different Types of Central Countries
+# Create a typology of countries based on their centrality profiles
+centrality_profiles <- centrality_df %>%
+  mutate(
+    import_hub = std_in_degree > 0.7,
+    export_hub = std_out_degree > 0.7,
+    bridge = std_betweenness > 0.7,
+    influential = std_eigenvector > 0.7,
+    balanced = abs(std_in_degree - std_out_degree) < 0.3 & std_in_degree > 0.5,
+    peripheral = std_in_degree < 0.3 & std_out_degree < 0.3 & std_betweenness < 0.3
+  ) %>%
+  mutate(
+    profile = case_when(
+      bridge & export_hub & import_hub ~ "Global Hub",
+      bridge & export_hub ~ "Global Supplier",
+      bridge & import_hub ~ "Global Consumer",
+      export_hub & !import_hub ~ "Pure Exporter",
+      import_hub & !export_hub ~ "Pure Importer",
+      balanced ~ "Balanced Trader",
+      peripheral ~ "Peripheral",
+      TRUE ~ "Mixed"
+    )
+  )
+
+# Theoretical context to profiles based on World Systems Theory
+centrality_profiles <- centrality_profiles %>%
+  mutate(
+    world_system_position = case_when(
+      profile %in% c("Global Hub", "Global Supplier") ~ "Core",
+      profile %in% c("Balanced Trader", "Global Consumer") ~ "Semi-periphery",
+      profile %in% c("Peripheral", "Pure Importer") ~ "Periphery",
+      TRUE ~ "Mixed"
+    )
+  )
+
+# Count countries by profile
+profile_counts <- centrality_profiles %>%
+  count(profile, world_system_position) %>%
+  arrange(world_system_position, desc(n))
+
+cat("\nCountry Trade Profiles Based on Centrality Measures:\n")
+print(profile_counts)
+
+# Show examples of each profile
+profile_examples <- centrality_profiles %>%
+  group_by(profile, world_system_position) %>%
+  slice_max(order_by = std_betweenness, n = 3) %>%
+  select(profile, world_system_position, country, region, in_degree, out_degree, betweenness)
+
+cat("\nExamples of Each Trade Profile with World Systems Position:\n")
+print(profile_examples)
+
+# Visualize distribution of profiles by region
+profile_by_region <- centrality_profiles %>%
+  count(profile, region, world_system_position) %>%
+  group_by(region) %>%
+  mutate(percentage = n / sum(n) * 100)
+
+ggplot(profile_by_region, aes(x = region, y = percentage, fill = world_system_position)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Distribution of Trade Positions by Region",
+       subtitle = "Categorized by World Systems Theory",
+       x = "Region",
+       y = "Percentage",
+       fill = "Position in World System") +
+  scale_fill_manual(values = c("Core" = "#1f78b4", "Semi-periphery" = "#33a02c", "Periphery" = "#e31a1c", "Mixed" = "#ff7f00")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Statistical testing of regional differences in centrality
+# ANOVA to test if centrality measures differ significantly by region
+cat("\nStatistical Tests for Regional Differences in Network Position:\n")
+
+# Function to run and report ANOVA or Kruskal-Wallis tests
+test_regional_difference <- function(measure_name, measure_vector) {
+  # Check if parametric assumptions are met
+  levene_test <- leveneTest(measure_vector ~ region, data = centrality_df)
+  shapiro_test <- shapiro.test(measure_vector)
+  
+  if(levene_test$`Pr(>F)`[1] > 0.05 && shapiro_test$p.value > 0.05) {
+    # Parametric assumptions met - use ANOVA
+    result <- summary(aov(measure_vector ~ region, data = centrality_df))
+    p_value <- result[[1]][["Pr(>F)"]][1]
+    test_type <- "ANOVA"
+  } else {
+    # Non-parametric alternative
+    result <- kruskal.test(measure_vector ~ region, data = centrality_df)
+    p_value <- result$p.value
+    test_type <- "Kruskal-Wallis"
+  }
+  
+  # Report results
+  significance <- if(p_value < 0.05) "significant" else "not significant"
+  cat(paste0(measure_name, ": Regional differences are statistically ", significance, 
+            " (", test_type, ", p = ", round(p_value, 4), ")\n"))
+  
+  return(p_value < 0.05)
+}
+
+# Test each centrality measure
+in_degree_sig <- test_regional_difference("Import Connections (In-Degree)", centrality_df$in_degree)
+out_degree_sig <- test_regional_difference("Export Connections (Out-Degree)", centrality_df$out_degree)
+betweenness_sig <- test_regional_difference("Trade Brokerage (Betweenness)", centrality_df$betweenness)
+eigenvector_sig <- test_regional_difference("Elite Connections (Eigenvector)", centrality_df$eigenvector)
+pagerank_sig <- test_regional_difference("Trade Influence (PageRank)", centrality_df$page_rank)
+
+# SECTION: Structural Equivalence Analysis
+# Identify countries that occupy similar positions in the trade network
+cat("\nStructural Equivalence Analysis - Identifying Similar Trade Positions:\n")
+
+# Create distance matrix based on centrality profiles
+centrality_matrix <- as.matrix(centrality_df[, c("std_in_degree", "std_out_degree", 
+                                               "std_betweenness", "std_eigenvector", 
+                                               "std_page_rank")])
+row.names(centrality_matrix) <- centrality_df$country
+
+# Calculate Euclidean distance between countries' network positions
+position_dist <- dist(centrality_matrix)
+
+# Hierarchical clustering to identify structurally equivalent countries
+position_clusters <- hclust(position_dist, method = "ward.D2")
+
+# Determine optimal number of clusters
+if(nrow(centrality_df) > 10) {
+  # For larger networks
+  k <- 5  # Reasonable default for interpretation
+} else {
+  # For smaller networks
+  k <- min(3, nrow(centrality_df) - 1)
+}
+
+# Cut the dendrogram to create clusters
+position_groups <- cutree(position_clusters, k = k)
+
+# Add clusters to the centrality dataframe
+centrality_df$position_cluster <- position_groups
+
+# Examine each cluster's characteristics
+cluster_profiles <- centrality_df %>%
+  group_by(position_cluster) %>%
+  summarize(
+    count = n(),
+    countries = paste(head(sort(country), 5), collapse=", "),
+    avg_in_degree = mean(in_degree),
+    avg_out_degree = mean(out_degree),
+    avg_betweenness = mean(betweenness),
+    avg_eigenvector = mean(eigenvector),
+    dominant_region = names(which.max(table(region)))
+  ) %>%
+  arrange(desc(avg_betweenness))
+
+# Report results
+cat("\nStructurally Equivalent Country Groups (Similar Network Positions):\n")
+print(cluster_profiles)
+
+# 4. Focus on Betweenness Centrality and Trade Brokerage
+# Analyze countries with high betweenness centrality as trade brokers
+trade_brokers <- centrality_df %>%
+  filter(betweenness > quantile(betweenness, 0.9)) %>%
+  select(country, region, in_degree, out_degree, betweenness, page_rank) %>%
+  arrange(desc(betweenness))
+
+cat("\nTop Trade Brokers (High Betweenness Centrality):\n")
+print(trade_brokers)
+
+# Calculate the percentage of shortest paths that each region controls
+region_betweenness <- centrality_df %>%
+  group_by(region) %>%
+  summarize(
+    total_betweenness = sum(betweenness),
+    country_count = n(),
+    avg_betweenness = mean(betweenness),
+    percentage = sum(betweenness) / sum(centrality_df$betweenness) * 100
+  ) %>%
+  arrange(desc(percentage))
+
+cat("\nRegional Control of Trade Paths (Betweenness by Region):\n")
+print(region_betweenness)
+
+# Visualization of regional betweenness control
+ggplot(region_betweenness, aes(x = reorder(region, percentage), y = percentage)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, color = "black", size = 3) +
+  labs(title = "Regional Control of Global Trade Paths",
+       subtitle = "Percentage of Network Betweenness by Region (Higher = More Control)",
+       x = "Region",
+       y = "% of Global Trade Brokerage Power") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 5. PageRank Analysis for Trade Influence
+# Examine countries with high PageRank as influential in the trade network
+influential_countries <- centrality_df %>%
+  filter(page_rank > quantile(page_rank, 0.9)) %>%
+  select(country, region, in_degree, out_degree, betweenness, page_rank) %>%
+  arrange(desc(page_rank))
+
+cat("\nMost Influential Countries in Trade Network (High PageRank):\n")
+print(influential_countries)
+
+# 6. Degree Centrality and Trade Balance Analysis
+# Analyze trade balance (export vs import connections)
+centrality_df$trade_balance <- centrality_df$out_degree - centrality_df$in_degree
+centrality_df$trade_openness <- centrality_df$in_degree + centrality_df$out_degree
+
+# Consolidated trade balance plot with enhanced interpretation
+trade_balance_plot <- ggplot(centrality_df, aes(x = trade_openness, y = trade_balance, color = region)) +
+  geom_point(alpha = 0.7, aes(size = betweenness)) +
+  geom_text_repel(data = centrality_df %>% 
+                 filter(abs(trade_balance) > quantile(abs(trade_balance), 0.95) | 
+                       trade_openness > quantile(trade_openness, 0.95)),
+               aes(label = country), size = 3, max.overlaps = 15) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  # Add quadrant labels for interpretation
+  annotate("text", x = max(centrality_df$trade_openness) * 0.8, 
+          y = max(centrality_df$trade_balance) * 0.8,
+          label = "Export-Oriented\nHigh Connectivity", size = 3, fontface = "bold") +
+  annotate("text", x = max(centrality_df$trade_openness) * 0.8, 
+          y = min(centrality_df$trade_balance) * 0.8,
+          label = "Import-Dependent\nHigh Connectivity", size = 3, fontface = "bold") +
+  labs(title = "Network Trade Balance vs Trade Openness",
+       subtitle = "Size represents brokerage power (betweenness centrality)",
+       x = "Total Connectivity (In-Degree + Out-Degree)",
+       y = "Trade Balance (Out-Degree - In-Degree)",
+       color = "Region",
+       size = "Brokerage\nPower") +
+  scale_size_continuous(range = c(1, 8)) +
+  theme_minimal()
+
+# Display the plot
+print(trade_balance_plot)
+
+# One consolidated trade balance analysis by region
+trade_balance_by_region <- centrality_df %>%
+  group_by(region) %>%
+  summarize(
+    avg_trade_balance = mean(trade_balance),
+    positive_balance_count = sum(trade_balance > 0),
+    negative_balance_count = sum(trade_balance < 0),
+    positive_balance_pct = positive_balance_count / (positive_balance_count + negative_balance_count) * 100,
+    # Add more insightful metrics
+    net_export_bias = sum(trade_balance > 0) - sum(trade_balance < 0),
+    avg_openness = mean(trade_openness),
+    connectivity_inequality = sd(trade_openness) / mean(trade_openness) # Coefficient of variation
+  ) %>%
+  arrange(desc(avg_trade_balance))
+
+cat("\nRegional Trade Network Position Analysis:\n")
+print(trade_balance_by_region)
+
+# 7. Eigenvector Centrality - Countries Connected to Important Partners
+# Identify countries that are well-connected to other important countries
+well_connected_countries <- centrality_df %>%
+  filter(eigenvector > quantile(eigenvector, 0.9)) %>%
+  select(country, region, in_degree, out_degree, betweenness, eigenvector) %>%
+  arrange(desc(eigenvector))
+
+cat("\nCountries Connected to Important Partners (High Eigenvector Centrality):\n")
+print(well_connected_countries)
+
+# Hub and Authority Analysis
+# This adds a directed network perspective specifically relevant to trade
+hub_auth <- hub_score(trade_graph, scale = TRUE)
+auth_score <- authority_score(trade_graph, scale = TRUE)
+
+# Add hub and authority scores to centrality dataframe
+centrality_df$hub_score <- hub_auth$vector[match(centrality_df$country, V(trade_graph)$name)]
+centrality_df$authority_score <- auth_score$vector[match(centrality_df$country, V(trade_graph)$name)]
+
+# Identify top hubs and authorities
+top_hubs <- centrality_df %>%
+  top_n(10, hub_score) %>%
+  select(country, region, hub_score, authority_score, out_degree, in_degree) %>%
+  arrange(desc(hub_score))
+
+top_authorities <- centrality_df %>%
+  top_n(10, authority_score) %>%
+  select(country, region, authority_score, hub_score, in_degree, out_degree) %>%
+  arrange(desc(authority_score))
+
+cat("\nTop Export Hubs (Countries connecting to many importers):\n")
+print(top_hubs)
+
+cat("\nTop Import Authorities (Countries receiving exports from many hubs):\n")
+print(top_authorities)
+
+# 8. Conclusion: Key Insights from Centrality Analysis
+cat("\n----------------------------------------\n")
+cat("KEY INSIGHTS FROM NETWORK POSITION ANALYSIS\n")
+cat("----------------------------------------\n")
+
+cat("1. Different network positions reveal distinct roles in the global trade system:\n")
+cat("   - High In-Degree: Countries importing from many partners (diverse sourcing)\n")
+cat("   - High Out-Degree: Countries exporting to many markets (market reach)\n")
+cat("   - High Betweenness: Trade bridges controlling paths between other countries\n")
+cat("   - High Eigenvector: Countries trading with other important trade partners\n")
+
+cat("\n2. Statistical analysis confirms significant regional patterns in network positions:\n")
+pvals <- c(in_degree_sig, out_degree_sig, betweenness_sig, eigenvector_sig, pagerank_sig)
+sig_measures <- c("Import Connections", "Export Connections", "Trade Brokerage", 
+                 "Elite Connections", "Trade Influence")[pvals]
+cat(paste("   - Statistically significant regional differences in:", 
+         paste(sig_measures, collapse=", "), "\n"))
+
+cat("\n3. Structural equivalence analysis identified", k, "distinct groups of countries with similar network positions\n")
+cat("   - The largest structurally equivalent group contains", 
+    max(cluster_profiles$count), "countries including", 
+    cluster_profiles$countries[which.max(cluster_profiles$count)], "\n")
+
+cat("\n4. From a world systems theory perspective, we identified:\n")
+cat("   - Core countries (", sum(centrality_profiles$world_system_position == "Core"), 
+    ") with high centrality across multiple measures\n")
+cat("   - Semi-periphery countries (", sum(centrality_profiles$world_system_position == "Semi-periphery"), 
+    ") with moderate centrality and specialized roles\n")
+cat("   - Periphery countries (", sum(centrality_profiles$world_system_position == "Periphery"), 
+    ") with low centrality across measures\n")
+
+cat("\n5. Network trade balance analysis shows", 
+    trade_balance_by_region$region[1], 
+    "has the most export-oriented network position with an average of", 
+    round(trade_balance_by_region$avg_trade_balance[1], 2), 
+    "more export than import connections\n")
+
+cat("\n6. Trade brokerage power (betweenness) is dominated by", 
+    region_betweenness$region[1], "controlling", 
+    round(region_betweenness$percentage[1]), "% of trade paths\n")
+
+cat("\n7. Hub and authority analysis reveals that", top_hubs$country[1], 
+    "is the strongest export hub while", top_authorities$country[1],
+    "is the strongest import authority in the network\n")
+
+```
+International Trade Network Analysis: Centrality Measures 37242
+Part 6: Social Network Analysis Break Down for Node visualization and GDP impact
+
+```{r}
+# Re-insert required libraries
+library(igraph)
+library(dplyr)
+library(readr)
+library(scales)
+library(RColorBrewer)
+library(ggplot2)
+library(ggraph)
+library(tidygraph)
+library(ggrepel)
+
+
+# 1. INTEGRATE GDP DATA WITH NETWORK STRUCTURE
+
+# Load GDP data (adjust path as needed)
+gdp_data <- read_csv("4d4ba6e9-790f-47e0-b259-44b09bf80aff_Data.csv")
+
+# Extract and clean GDP data for 2022
+gdp_by_country <- gdp_data %>%
+  filter(`Series Name` == "GDP (current US$)") %>%
+  select(`Country Code`, `Country Name`, `2022 [YR2022]`) %>%
+  mutate(
+    gdp_raw = `2022 [YR2022]`,
+    gdp_raw = ifelse(gdp_raw == ".." | is.na(gdp_raw), NA, gdp_raw),
+    gdp = as.numeric(gdp_raw),
+    gdp_billions = gdp / 1e9
+  ) %>%
+  select(`Country Code`, `Country Name`, gdp, gdp_billions)
+
+# Create mapping between country names and ISO codes
+iso_mapping <- gdp_by_country %>%
+  select(`Country Code`, `Country Name`) %>%
+  rename(iso_code = `Country Code`, country_name = `Country Name`)
+
+# Prepare trade edges with ISO codes
+trade_edges <- trade_df %>%
+  filter(primaryValue > 0) %>%
+  left_join(iso_mapping, by = c("reporterDesc" = "country_name")) %>%
+  rename(source_iso = iso_code) %>%
+  left_join(iso_mapping, by = c("partner2Desc" = "country_name")) %>%
+  rename(target_iso = iso_code) %>%
+  filter(!is.na(source_iso) & !is.na(target_iso)) %>%
+  select(source_iso, target_iso, value = primaryValue)
+
+# Create node dataset with GDP and region classification
+network_nodes <- gdp_by_country %>%
+  filter(`Country Code` %in% unique(c(trade_edges$source_iso, trade_edges$target_iso))) %>%
+  rename(iso_code = `Country Code`, country_name = `Country Name`) %>%
+  # Add region classification based on ISO codes
+  mutate(
+    region = case_when(
+      iso_code %in% c("USA", "CAN", "MEX") ~ "North America",
+      iso_code %in% c("DEU", "FRA", "GBR", "ITA", "ESP", "NLD", "CHE", "SWE", "POL", "BEL") ~ "Europe",
+      iso_code %in% c("CHN", "JPN", "KOR", "IND", "IDN", "THA", "MYS", "SGP", "VNM", "PHL") ~ "Asia",
+      iso_code %in% c("BRA", "ARG", "CHL", "COL", "PER", "VEN") ~ "South America",
+      iso_code %in% c("ZAF", "NGA", "EGY", "MAR", "KEN", "GHA", "TZA") ~ "Africa",
+      iso_code %in% c("AUS", "NZL") ~ "Oceania",
+      TRUE ~ "Other"
+    )
+  )
+
+# 2. BUILD ENHANCED IGRAPH NETWORK WITH GDP DATA
+
+# Create igraph object integrating trade data with GDP information
+trade_network <- graph_from_data_frame(
+  d = trade_edges,
+  vertices = network_nodes,
+  directed = TRUE
+)
+
+# Calculate comprehensive network metrics
+V(trade_network)$in_degree <- degree(trade_network, mode = "in")
+V(trade_network)$out_degree <- degree(trade_network, mode = "out")
+V(trade_network)$betweenness <- betweenness(trade_network, directed = TRUE)
+V(trade_network)$eigen <- eigen_centrality(trade_network)$vector
+V(trade_network)$pagerank <- page_rank(trade_network)$vector
+V(trade_network)$trade_balance <- V(trade_network)$out_degree - V(trade_network)$in_degree
+
+# Create core-periphery classification based on network position
+# Core: High pagerank = trade influence
+# Semi-periphery: Moderate pagerank but high betweenness = brokers
+# Periphery: Low on both measures
+V(trade_network)$position <- "Periphery"
+pagerank_threshold <- quantile(V(trade_network)$pagerank, 0.8, na.rm = TRUE)
+betweenness_threshold <- quantile(V(trade_network)$betweenness, 0.7, na.rm = TRUE)
+
+V(trade_network)$position[V(trade_network)$pagerank > pagerank_threshold] <- "Core"
+V(trade_network)$position[V(trade_network)$betweenness > betweenness_threshold & 
+                        V(trade_network)$position == "Periphery"] <- "Semi-Periphery"
+
+
+# 3. CONVERT TO TIDYGRAPH FOR ENHANCED VISUALIZATION
+
+# Convert igraph to tidygraph for more flexible visualization
+tg_trade <- as_tbl_graph(trade_network)
+
+# Add computed attributes for visualization
+tg_trade <- tg_trade %>%
+  activate(nodes) %>%
+  mutate(
+    # Node size scaling (log scale for GDP)
+    node_size = ifelse(is.na(gdp_billions), 1, log10(gdp_billions + 1)),
+    
+    # Scale centrality measures for visualization
+    scaled_betweenness = betweenness / max(betweenness, na.rm = TRUE),
+    scaled_pagerank = pagerank / max(pagerank, na.rm = TRUE),
+    
+    # Node labeling logic
+    show_label = gdp_billions > quantile(gdp_billions, 0.9, na.rm = TRUE) |
+                betweenness > quantile(betweenness, 0.9, na.rm = TRUE),
+    
+    # Trade balance classification
+    balance_category = case_when(
+      trade_balance > 5 ~ "Strong Export",
+      trade_balance > 0 ~ "Moderate Export",
+      trade_balance < -5 ~ "Strong Import",
+      trade_balance < 0 ~ "Moderate Import",
+      TRUE ~ "Balanced"
+    )
+  )
+
+# Add edge attributes
+tg_trade <- tg_trade %>%
+  activate(edges) %>%
+  mutate(
+    # Log scale for edge width to handle extreme values
+    edge_width = log10(value + 1) / max(log10(value + 1), na.rm = TRUE) * 1.5
+  )
+
+# 4. KEY VISUALIZATION FUNCTION
+
+# Define common theme for network visualizations
+theme_network <- function() {
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+}
+
+# 5. INTEGRATED VISUALIZATION: GDP-WEIGHTED CORE-PERIPHERY STRUCTURE
+
+
+# This visualization integrates GDP, network position, and regional information
+# Improved version with filtered nodes and edges
+# First, identify important countries
+top_gdp_countries <- names(sort(V(trade_network)$gdp_billions, decreasing = TRUE)[1:40])
+important_countries <- unique(c(
+  top_gdp_countries,
+  names(sort(V(trade_network)$betweenness, decreasing = TRUE)[1:15])
+))
+
+# Create filtered graph with only important nodes visible
+filtered_tg <- tg_trade %>%
+  activate(nodes) %>%
+  mutate(important = name %in% important_countries) %>%
+  # Make non-important nodes very small and transparent
+  mutate(
+    node_size = ifelse(important, node_size, node_size * 0.3),
+    node_alpha = ifelse(important, 0.9, 0.1)
+  )
+
+# Re-create visualization with better spacing and filtering
+
+# 1. Identify truly important countries (top 25 max)
+top_gdp_indices <- order(V(trade_network)$gdp_billions, decreasing = TRUE)[1:25]
+top_gdp_countries <- V(trade_network)$country_name[top_gdp_indices]
+
+# 2. Create subgraph with ONLY these countries
+minimal_graph <- induced_subgraph(trade_network, top_gdp_indices)
+
+# 3. Convert to tidygraph for visualization
+tg_minimal <- as_tbl_graph(minimal_graph)
+
+# 4. Create a very simple network layout - try circle first
+integrated_viz <- ggraph(tg_minimal, layout = 'circle') + 
+  # Minimal edges with high transparency
+  geom_edge_link(
+    alpha = 0.15,
+    width = 0.3,
+    color = "gray60",
+    show.legend = FALSE
+  ) +
+  # Clear, well-spaced nodes
+  geom_node_point(
+    aes(size = gdp_billions, color = position, shape = region),
+    alpha = 0.9
+  ) +
+  # Label ALL countries in this minimal graph
+  geom_node_text(
+    aes(label = country_name),
+    repel = TRUE,
+    size = 4,
+    fontface = "bold",
+    bg.color = "white",
+    bg.r = 0.15,
+    box.padding = 0.8,
+    point.padding = 0.5
+  ) +
+  # Simple scales
+  scale_size_continuous(
+    name = "GDP (billions USD)",
+    range = c(5, 15),
+    trans = "log10"
+  ) +
+  scale_color_manual(
+    name = "Network Position",
+    values = c("Core" = "firebrick", "Semi-Periphery" = "darkorange", "Periphery" = "steelblue")
+  ) +
+  scale_shape_manual(
+    name = "Region",
+    values = c(
+      "North America" = 16, "Europe" = 17, "Asia" = 15, 
+      "South America" = 18, "Africa" = 19, "Oceania" = 8, "Other" = 4
+    )
+  ) +
+  # Clean titles
+  labs(
+    title = "Major Economies in International Trade Network",
+    subtitle = "Top 25 economies by GDP, showing network position and regional distribution",
+    caption = "Core = high influence, Semi-periphery = high brokerage, Periphery = low centrality"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    legend.position = "right"
+  )
+# This visualization includes some insignificant data points like the United States that do not have sufficient data. This is why they are categorized as periphery when it may not be in reality. It is left in this visualization for GDP reference relevance 
+
+# Save the visualization
+ggsave("integrated_trade_network.png", integrated_viz, width = 12, height = 10, dpi = 300)
+print(integrated_viz)
+
+# 6. STRUCTURAL ANALYSIS: GDP VS. NETWORK POSITION
+
+# This visualization explores the relationship between economic size and structural position
+node_data <- tg_trade %>%
+  activate(nodes) %>%
+  as_tibble()
+
+# Create scatter plot comparing GDP with betweenness centrality
+structure_viz <- ggplot(node_data, aes(x = gdp_billions, y = betweenness)) +
+  # Add points
+  geom_point(
+    aes(size = pagerank, color = position),
+    alpha = 0.8
+  ) +
+  # Add regression line to show relationship
+  geom_smooth(
+    method = "lm",
+    color = "gray30",
+    linetype = "dashed",
+    size = 0.5,
+    se = FALSE
+  ) +
+  # Add labels for countries that deviate from expected pattern
+  geom_text_repel(
+    aes(label = ifelse(
+      (scaled_betweenness > 0.5 & node_size < median(node_size)) | 
+      (node_size > 3 & scaled_betweenness < 0.2) |
+      (pagerank > quantile(pagerank, 0.95)), 
+      country_name, NA)),
+    size = 3,
+    box.padding = 0.5,
+    max.overlaps = 15
+  ) +
+  # Scale settings
+  scale_x_log10(
+    name = "GDP in Billions USD (log scale)",
+    labels = scales::label_number(scale_cut = scales::cut_short_scale())
+  ) +
+  scale_y_log10(
+    name = "Betweenness Centrality (log scale)",
+    labels = scales::label_number()
+  ) +
+  scale_size_continuous(
+    name = "Trade Influence\n(PageRank)",
+    range = c(1, 8)
+  ) +
+  # Color for world system position
+  scale_color_manual(
+    name = "Network Position",
+    values = c("Core" = "firebrick", "Semi-Periphery" = "darkorange", "Periphery" = "steelblue")
+  ) +
+  # Titles and theme
+  labs(
+    title = "Economic Size vs. Structural Position in Trade Network",
+    subtitle = "Comparing GDP with Brokerage Power (Betweenness Centrality)",
+    caption = "Outliers represent countries with structural positions that deviate from economic size expectations"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11)
+  )
+
+# Save the visualization
+ggsave("gdp_vs_network_position.png", structure_viz, width = 12, height = 8, dpi = 300)
+print(structure_viz)
+
+# 7. TRADE BALANCE ANALYSIS
+# Create a visualization focused on trade balance
+# Re-classify balance categories with more nuanced thresholds
+
+tg_trade_balanced <- tg_trade %>%
+  activate(nodes) %>%
+  mutate(
+    # Create more balanced categories
+    balance_category = case_when(
+      trade_balance > 100 ~ "Strong Export",
+      trade_balance > 20 ~ "Moderate Export",
+      trade_balance > 5 ~ "Slight Export",
+      trade_balance < -100 ~ "Strong Import",
+      trade_balance < -20 ~ "Moderate Import",
+      trade_balance < -5 ~ "Slight Import",
+      TRUE ~ "Balanced"
+    ),
+    # Identify important countries for labeling
+    important = gdp_billions > quantile(gdp_billions, 0.9, na.rm = TRUE) | 
+              abs(trade_balance) > quantile(abs(trade_balance), 0.9, na.rm = TRUE)
+  )
+
+# Recreate balance visualization with better categories and selective labeling
+balance_viz <- ggraph(tg_trade_balanced, layout = 'nicely') + 
+  geom_edge_fan(
+    aes(width = edge_width),
+    alpha = 0.1,
+    arrow = arrow(length = unit(1, 'mm')),
+    end_cap = circle(2, 'mm'),
+    color = "gray50",
+    show.legend = FALSE
+  ) +
+  geom_node_point(
+    aes(size = node_size, color = balance_category),
+    alpha = 0.85
+  ) +
+  # Label only important countries
+  geom_node_text(
+    aes(label = ifelse(important, country_name, NA)),
+    repel = TRUE,
+    size = 3.5,
+    fontface = "bold",
+    bg.color = "white",
+    bg.r = 0.1,
+    segment.color = "gray50",
+    box.padding = 0.7,
+    max.overlaps = 15
+  ) +
+  scale_size_continuous(
+    name = "GDP (billions USD)",
+    range = c(2, 12),
+    breaks = c(0.5, 1, 2, 3, 4),
+    labels = c("3", "10", "100", "1,000", "10,000")
+  ) +
+  # Better color palette with more categories
+  scale_color_manual(
+    name = "Trade Balance",
+    values = c(
+      "Strong Export" = "darkgreen", 
+      "Moderate Export" = "forestgreen",
+      "Slight Export" = "lightgreen",
+      "Balanced" = "gray70",
+      "Slight Import" = "lightsalmon",
+      "Moderate Import" = "indianred",
+      "Strong Import" = "firebrick"
+    )
+  ) +
+  labs(
+    title = "Trade Balance Structure in Global Network",
+    subtitle = "Node size = GDP, Color = Export/Import Balance",
+    caption = "Balance calculated from difference between export and import connections"
+  ) +
+  theme_network()
+
+# Save the visualization
+ggsave("trade_balance_network.png", balance_viz, width = 12, height = 10, dpi = 300)
+print(balance_viz)
+
+# 8. REGIONAL STRUCTURE AND INTER-REGIONAL FLOWS
+# Advanced circular layout with proper region-based ordering
+
+# Extract top economies properly
+top_gdp_countries <- V(trade_network)$country_name[order(V(trade_network)$gdp_billions, decreasing = TRUE)][1:60]
+top_subgraph <- induced_subgraph(trade_network, which(V(trade_network)$country_name %in% top_gdp_countries))
+
+# Transform into tidygraph for advanced manipulation
+tg_top <- as_tbl_graph(top_subgraph)
+
+# Regional ordering for meaningful circular positioning
+tg_top <- tg_top %>%
+  activate(nodes) %>%
+  mutate(
+    # Order first by region, then by GDP within region
+    region_order = match(region, c("Europe", "Asia", "North America", "South America", "Africa", "Oceania", "Other")),
+    # Calculate position index for ordering
+    pos_idx = as.numeric(factor(region_order)) * 1000 + order(desc(gdp_billions))
+  ) %>%
+  arrange(pos_idx)
+
+# Calculate coordinates for circular layout with proper regional grouping
+node_count <- gorder(tg_top)
+node_df <- tg_top %>% 
+  activate(nodes) %>% 
+  as_tibble()
+
+# Create balanced angle distribution with gaps between regions
+region_counts <- table(node_df$region)
+current_angle <- 0
+angle_coords <- numeric(node_count)
+
+for (reg in unique(node_df$region)) {
+  if (is.na(reg)) next
+  
+  # Get indices for this region
+  region_indices <- which(node_df$region == reg)
+  region_size <- length(region_indices)
+  
+  # Skip if empty
+  if (region_size == 0) next
+  
+  # Calculate angles for this region (leaving small gaps between regions)
+  region_span <- 2 * pi * (region_size / node_count) * 0.9  # 10% gap
+  angles <- seq(current_angle, current_angle + region_span, length.out = region_size)
+  angle_coords[region_indices] <- angles
+  
+  # Update current angle for next region (with gap)
+  current_angle <- current_angle + region_span + (2 * pi / node_count)
+}
+
+# Create layout dataframe
+layout_df <- data.frame(
+  x = cos(angle_coords),
+  y = sin(angle_coords)
+)
+
+# Create advanced visualization with region-based circular layout
+circular_viz <- ggraph(tg_top, layout = layout_df) + 
+  # Edge rendering with proper data handling
+  geom_edge_link(
+    aes(width = log10(value + 1) / max(log10(value + 1)) * 0.8, 
+        alpha = 0.2),
+    color = "gray40",
+    show.legend = FALSE
+  ) +
+  # Add region arcs in background
+  geom_polygon(
+    data = layout_df %>% 
+      cbind(region = node_df$region) %>%
+      group_by(region) %>%
+      summarize(
+        x = c(x, first(x)), 
+        y = c(y, first(y))
+      ),
+    aes(x = 1.2 * x, y = 1.2 * y, fill = region),
+    alpha = 0.1
+  ) +
+  # Node visualization with GDP scaling
+  geom_node_point(
+    aes(size = gdp_billions, color = region),
+    alpha = 0.9
+  ) +
+  # Advanced label placement for circular layout
+  geom_node_text(
+    aes(label = country_name),
+    size = 3,
+    repel = TRUE,
+    segment.color = "gray50",
+    box.padding = 0.4,
+    point.padding = 0.2,
+    max.overlaps = 15
+  ) +
+  # Enhanced scales for better interpretation
+  scale_size_continuous(
+    name = "GDP (billions USD)",
+    range = c(2, 12),
+    trans = "log10" 
+  ) +
+  scale_color_brewer(name = "Region", palette = "Set1") +
+  scale_fill_brewer(name = "Region", palette = "Set1") +
+  # Circular coordinates constraints
+  coord_fixed() +
+  # Academic titles with methodological context
+  labs(
+    title = "Regional Structure in International Trade Network",
+    subtitle = "Circular layout reveals systemic regional clustering and inter-regional trade flows",
+    caption = "Node size proportional to GDP (log scale). Countries positioned by region and economic significance."
+  ) +
+  guides(fill = "none") +  # Hide redundant fill legend
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right"
+  )
+
+# Save publication-quality visualization
+ggsave("regional_trade_structure.png", circular_viz, width = 12, height = 10, dpi = 300)
+print(circular_viz)
+# Save the visualization
+ggsave("regional_trade_structure.png", circular_viz, width = 12, height = 10, dpi = 300)
+print(circular_viz)
+
+# 9. ADVANCED STRUCTURAL ANALYSIS: EXTRACT NETWORK METRICS
+
+# Calculate key network metrics for academic analysis
+network_density <- edge_density(trade_network)
+network_reciprocity <- reciprocity(trade_network)
+network_transitivity <- transitivity(trade_network, type = "global")
+network_diameter <- diameter(trade_network)
+avg_path_length <- mean_distance(trade_network, directed = TRUE)
+
+# Professional approach to extract vertex attributes with proper error handling
+extract_vertex_attribute <- function(graph, attr_name, default_value = NA) {
+  if(attr_name %in% vertex_attr_names(graph)) {
+    return(vertex_attr(graph, attr_name))
+  } else {
+    return(rep(default_value, vcount(graph)))
+  }
+}
+
+# Systematically extract all required vertex attributes
+vertices_count <- vcount(trade_network)
+cat("Extracting data for", vertices_count, "countries in the network\n")
+
+# Create centrality dataframe with robust attribute extraction
+centrality_df <- data.frame(
+  # Name is the only guaranteed attribute
+  country = vertex_attr(trade_network, "name"),
+  
+  # Extract all other attributes with appropriate defaults
+  iso_code = extract_vertex_attribute(trade_network, "iso_code"),
+  region = extract_vertex_attribute(trade_network, "region", "Unknown"),
+  position = extract_vertex_attribute(trade_network, "position", "Periphery"),
+  gdp_billions = extract_vertex_attribute(trade_network, "gdp_billions"),
+  in_degree = extract_vertex_attribute(trade_network, "in_degree", 0),
+  out_degree = extract_vertex_attribute(trade_network, "out_degree", 0),
+  betweenness = extract_vertex_attribute(trade_network, "betweenness", 0),
+  pagerank = extract_vertex_attribute(trade_network, "pagerank", 0),
+  eigen = extract_vertex_attribute(trade_network, "eigen", 0)
+)
+
+# Add calculated trade balance if not already present
+if(!"trade_balance" %in% names(centrality_df)) {
+  centrality_df$trade_balance <- centrality_df$out_degree - centrality_df$in_degree
+}
+
+# Ensure data quality by removing rows with missing critical information
+centrality_df <- centrality_df %>%
+  filter(!is.na(country))
+
+# Log extraction results
+cat("Successfully created centrality dataframe with", nrow(centrality_df), "countries\n")
+if(nrow(centrality_df) < vertices_count) {
+  cat("Note:", vertices_count - nrow(centrality_df), "vertices were excluded due to missing data\n")
+}
+
+# Quality control: check for extreme values or anomalies
+anomalies <- centrality_df %>%
+  filter(in_degree > 1000 | out_degree > 1000 | betweenness > 10000)
+
+
+# Identify key players based on different centrality measures
+top_importers <- centrality_df %>% 
+  filter(!is.na(in_degree)) %>%
+  arrange(desc(in_degree)) %>% 
+  head(10)
+
+top_exporters <- centrality_df %>% 
+  filter(!is.na(out_degree)) %>%
+  arrange(desc(out_degree)) %>% 
+  head(10)
+
+top_brokers <- centrality_df %>% 
+  filter(!is.na(betweenness)) %>%
+  arrange(desc(betweenness)) %>% 
+  head(10)
+
+top_influencers <- centrality_df %>% 
+  filter(!is.na(pagerank)) %>%
+  arrange(desc(pagerank)) %>% 
+  head(10)
+
+# Regional analysis with proper NA handling
+regional_summary <- centrality_df %>%
+  filter(!is.na(region) & region != "Unknown") %>%
+  group_by(region) %>%
+  summarize(
+    count = n(),
+    total_gdp = sum(gdp_billions, na.rm = TRUE),
+    avg_gdp = mean(gdp_billions, na.rm = TRUE),
+    avg_in_degree = mean(in_degree, na.rm = TRUE),
+    avg_out_degree = mean(out_degree, na.rm = TRUE),
+    avg_betweenness = mean(betweenness, na.rm = TRUE),
+    avg_pagerank = mean(pagerank, na.rm = TRUE),
+    core_count = sum(position == "Core", na.rm = TRUE),
+    export_oriented = sum(trade_balance > 0, na.rm = TRUE),
+    import_oriented = sum(trade_balance < 0, na.rm = TRUE)
+  ) %>%
+  arrange(desc(avg_betweenness))
+
+# Position analysis with proper NA handling
+position_summary <- centrality_df %>%
+  filter(!is.na(position)) %>%
+  group_by(position) %>%
+  summarize(
+    count = n(),
+    total_gdp = sum(gdp_billions, na.rm = TRUE),
+    avg_gdp = mean(gdp_billions, na.rm = TRUE),
+    avg_in_degree = mean(in_degree, na.rm = TRUE),
+    avg_out_degree = mean(out_degree, na.rm = TRUE),
+    avg_betweenness = mean(betweenness, na.rm = TRUE),
+    export_oriented = sum(trade_balance > 0, na.rm = TRUE),
+    import_oriented = sum(trade_balance < 0, na.rm = TRUE)
+  ) %>%
+  arrange(desc(avg_betweenness))
+
+# Correlation analysis with proper handling of missing values
+correlation_vars <- c("gdp_billions", "in_degree", "out_degree", "betweenness", "pagerank")
+correlation_data <- centrality_df[, correlation_vars]
+correlation_matrix <- cor(correlation_data, use = "pairwise.complete.obs")
+
+cat("Completed network metrics extraction and analysis\n")
+
+# 10. KEY INSIGHTS FROM SOCIAL NETWORK ANALYSIS
+
+
+cat("SOCIAL NETWORK ANALYSIS: KEY INSIGHTS\n")
+
+cat("\n1. NETWORK STRUCTURE METRICS:\n")
+cat("   - Density:", round(network_density, 4), "\n")
+cat("   - Reciprocity:", round(network_reciprocity, 4), "\n") 
+cat("   - Transitivity:", round(network_transitivity, 4), "\n")
+cat("   - Average Path Length:", round(avg_path_length, 2), "\n")
+cat("   These metrics indicate a ", 
+    ifelse(network_density < 0.1, "sparse", "relatively dense"), 
+    " network with ",
+    ifelse(network_reciprocity > 0.5, "high", "moderate"), 
+    " reciprocity and ",
+    ifelse(network_transitivity > 0.3, "significant", "limited"),
+    " clustering.\n")
+
+#CORE-PERIPHERY STRUCTURE
+cat("   The network exhibits a classic core-periphery structure with:\n")
+cat("   - Core countries (", sum(centrality_df$position == "Core"), "): High influence, many connections\n")
+cat("   - Semi-periphery (", sum(centrality_df$position == "Semi-Periphery"), "): Critical brokers\n")
+cat("   - Periphery (", sum(centrality_df$position == "Periphery"), "): Limited connections\n")
+cat("   Core countries represent only", 
+    round(100 * sum(centrality_df$position == "Core") / nrow(centrality_df), 1), 
+    "% of nations but control",
+    round(100 * sum(centrality_df$pagerank[centrality_df$position == "Core"]) / 
+         sum(centrality_df$pagerank), 1),
+    "% of network influence.\n")
+
+#STRUCTURAL POWER BEYOND GDP:\n")
+cat("   While GDP correlates with centrality (r =", 
+    round(correlation_matrix["gdp_billions", "pagerank"], 2), 
+    "with PageRank), several countries have\n")
+cat("   disproportionate structural power relative to economic size:\n")
+cat("   - Notable brokers:", 
+    paste(head(top_brokers$country_name[top_brokers$gdp_billions < 
+                                      median(top_brokers$gdp_billions)], 3), collapse=", "), "\n")
+
+#REGIONAL DYNAMICS:\n")
+cat("   - Dominant region:", regional_summary$region[1], "with", 
+    regional_summary$count[1], "countries and", 
+    round(regional_summary$total_gdp[1]), "billion USD total GDP\n")
+cat("   - Highest average betweenness:", 
+    regional_summary$region[which.max(regional_summary$avg_betweenness)], "\n")
+cat("   - Most export-oriented region:", 
+    regional_summary$region[which.max(regional_summary$export_oriented / 
+                                    regional_summary$count)], "\n")
+
+#THEORETICAL IMPLICATIONS
+#The network structure supports World Systems Theory's hierarchical view while also highlighting how specific network positions (particularly high betweenness, low constraint positions) provide forms of structural power beyond economic size alone. Semi-peripheral broker countries maintain critical paths in the network, potentially leveraging this position despite smaller economies
+
+#ECONOMIC SIZE VS. NETWORK POSITION
+#The GDP vs. betweenness analysis reveals important outliers where countries have network positions that diverge significantly from what their economic size would predict, suggesting specialized roles in global trade that transcend purely economic measures.
+```
+
+Candidate 49675: What clusters form in the global trade network and how are they shaped by trade volume and network structure? 
+```{r}
+# Measure assortativity based on trade volume
+# Create an assortativity matrix based on regions
+region_matrix <- as.matrix(table(centrality_df$region, centrality_df$region))
+assortativity <- assortativity(trade_graph, 
+                             types1 = match(sapply(V(trade_graph)$name, classify_region), 
+                                          unique(sapply(V(trade_graph)$name, classify_region))))
+
+cat("\nRegional Assortativity:", round(assortativity, 4), 
+    "\n(Positive values indicate countries tend to trade with others in the same region)\n")
+
+# Create a heatmap of regional trade flows
+# First, calculate regional trade flow matrix
+regions_list <- unique(centrality_df$region)
+region_flows <- matrix(0, nrow = length(regions_list), ncol = length(regions_list))
+rownames(region_flows) <- regions_list
+colnames(region_flows) <- regions_list
+
+# Fill the matrix with trade flows between regions
+for (i in 1:nrow(trade_df)) {
+  reporter_region <- classify_region(trade_df$reporterDesc[i])
+  partner_region <- classify_region(trade_df$partner2Desc[i])
+  
+  if (reporter_region %in% regions_list && partner_region %in% regions_list) {
+    region_flows[reporter_region, partner_region] <- region_flows[reporter_region, partner_region] + 1
+  }
+}
+
+# Create a heatmap of regional trade flows
+library(reshape2)
+region_flows_melted <- melt(region_flows)
+colnames(region_flows_melted) <- c("source_region", "target_region", "value")
+
+ggplot(region_flows_melted, aes(x = source_region, y = target_region, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Regional Trade Flows",
+       x = "Exporting Region",
+       y = "Importing Region",
+       fill = "Number of Trade Links") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+#global transitivity
+
+transitivity(
+  trade_graph,
+  type = "weighted",
+  weights = E(trade_graph)$weight
+)
+
+#local transitivity
+
+# Calculate per-country clustering
+V(trade_graph)$local_clustering <- transitivity(
+  trade_graph,
+  type = "weighted",
+  weights = E(trade_graph)$weight,
+  vids = V(trade_graph)
+)
+
+# Top 10 least clustered countries
+data.frame(
+  country = V(trade_graph)$name,
+  clustering = V(trade_graph)$local_clustering
+) %>% arrange(clustering) %>% head(10)
+
+# Graph
+
+library(ggraph)
+
+# Example: Assign weights from trade_data to edges
+E(trade_graph)$weight <- trade_data$primaryValue[match(
+  paste(ends(trade_graph, E(trade_graph), names = FALSE)[, 1], 
+        ends(trade_graph, E(trade_graph), names = FALSE)[, 2]),
+  paste(trade_data$reporterISO, trade_data$partner2ISO)
+)]
+
+ggraph(trade_graph, layout = "fr") +
+  geom_edge_link(aes(width = weight, alpha = weight), color = "gray") +  
+  geom_node_point(aes(size = strength(trade_graph, mode = "in")), color = "red") +  
+  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+  scale_edge_width(range = c(0.1, 2)) +
+  theme_void()
+
+```
+
+Candidate 39459: To what extent does the global trade network display small world properties? 
+```{r} 
+# 1. Extract largest weakly connected component from trade_graph
+components_real <- components(trade_graph, mode = "weak")
+trade_graph_connected <- induced_subgraph(trade_graph, which(components_real$membership == which.max(components_real$csize)))
+
+# 2. Compute structural metrics for real trade network
+apl_real <- mean_distance(trade_graph_connected, directed = TRUE)
+density_real <- edge_density(trade_graph_connected)
+trans_real <- transitivity(trade_graph_connected, type = "global")
+
+# 4. Prepare Watts-Strogatz parameters
+n <- gorder(trade_graph_connected)
+avg_deg <- mean(degree(trade_graph_connected))
+nei <- floor(avg_deg / 2)
+p <- 0.1  # rewiring probability
+
+# 5. Simulate 100 Watts-Strogatz small-world networks
+set.seed(123)
+sw_stats <- replicate(100, {
+  g_sw <- sample_smallworld(dim = 1, size = n, nei = nei, p = p)
+  c(
+    Density = edge_density(g_sw),
+    AvgPathLength = mean_distance(g_sw),
+    Transitivity = transitivity(g_sw, type = "global")
+  )
+})
+
+# 6. Calculate averages from simulation
+sw_stats_avg <- rowMeans(sw_stats)
+density_sim <- sw_stats_avg["Density"]
+apl_sim <- sw_stats_avg["AvgPathLength"]
+trans_sim <- sw_stats_avg["Transitivity"]
+
+# 7. Print summary
+cat("Small-World Simulation (100 runs):\n")
+cat("Avg. Density:", round(density_sim, 4), "\n")
+cat("Avg. Path Length:", round(apl_sim, 4), "\n")
+cat("Avg. Clustering (Transitivity):", round(trans_sim, 4), "\n\n")
+
+# 8. Create comparison tables
+
+# Summary table 
+results <- data.frame(
+  Network = c("Real Trade", "Small-World Sim"),
+  Density = c(density_real, density_sim),
+  APL = c(apl_real, apl_sim), Clustering = c(trans_real, trans_sim)
+)
+
+# 9. Output tables
+print(results)
+
+### PLOT Small world network 
+# Step 1: Define p values and simulate networks
+p_vec <- rep(c(0.001, 0.01, 0.02, 0.04, 0.07, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0), each = 5)
+
+# Get graph size and average degree from your real trade network
+components_real <- components(trade_graph, mode = "weak")
+trade_graph_connected <- induced_subgraph(trade_graph, which(components_real$membership == which.max(components_real$csize)))
+n_nodes <- gorder(trade_graph_connected)
+avg_deg <- mean(degree(trade_graph_connected))
+nei <- max(1, floor(avg_deg / 2))  # ensure nei is at least 1
+
+# Step 2: Simulate graphs for different p values
+set.seed(42)
+gs <- lapply(p_vec, function(p) {
+  sample_smallworld(dim = 1, size = n_nodes, nei = nei, p = p)
+})
+
+# Step 3: Calculate metrics
+g_apl <- sapply(gs, mean_distance)
+g_tran <- sapply(gs, transitivity)
+
+# Step 4: Plot the results
+par(mfrow = c(1, 2), mar = c(4, 4, 2, 2))
+
+# APL plot
+plot(p_vec, g_apl, col = 'grey', log = 'x', xlab = 'Rewiring probability (p)', 
+     ylab = 'Average Path Length', main = "APL vs Rewiring Probability")
+lines(smooth.spline(p_vec, g_apl), col = 'blue', lwd = 2)
+
+# Transitivity plot
+plot(p_vec, g_tran, col = 'grey', log = 'x', xlab = 'Rewiring probability (p)', 
+     ylab = 'Clustering Coefficient', main = "Clustering vs Rewiring Probability")
+lines(smooth.spline(p_vec, g_tran), col = 'darkgreen', lwd = 2)
+
+
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
